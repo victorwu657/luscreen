@@ -1,0 +1,10 @@
+2025-12-23 21:27:45,605 - INFO - Initializing CameraWidget with index: 1
+2025-12-23 21:27:45,606 - INFO - Attempting to start camera index: 1
+2025-12-23 21:27:46,400 - INFO - Available QMediaDevices: ['WeCam', 'HIK 2K Camera']
+2025-12-23 21:27:46,633 - INFO - Camera 1 opened successfully.
+2025-12-23 21:27:46,633 - INFO - Camera Properties - Width: 640.0, Height: 480.0, FPS: 0.0
+2025-12-23 21:27:47,661 - DEBUG - Frame 0: read success=True, shape=(480, 640, 3)
+2025-12-23 21:27:47,855 - DEBUG - Frame 1: read success=True, shape=(480, 640, 3)
+2025-12-23 21:27:47,885 - DEBUG - Frame 2: read success=True, shape=(480, 640, 3)
+2025-12-23 21:27:47,933 - DEBUG - Frame 3: read success=True, shape=(480, 640, 3)
+2025-12-23 21:27:47,965 - DEBUG - Frame 4: read success=True, shape=(480, 640, 3)

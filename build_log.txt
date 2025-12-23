@@ -1,0 +1,46 @@
+Nuitka-Options: Used command line options:
+Nuitka-Options:   --onefile --msvc=latest --lto=yes --plugin-enable=pyside6 --plugin-enable=numpy --include-qt-plugins=multimedia --include-package=soundcard --include-package-data=soundcard --include-package=soundfile --nofollow-import-to=setuptools --include-data-dir=assets=assets --include-data-file=C:\Python313\Lib\site-packages\imageio_ffmpeg\binaries\ffmpeg-win-x86_64-v7.1.exe=ffmpeg.exe --windows-console-mode=force --windows-icon-from-ico=assets/icon.png --company-name=LuScreen --product-name=LuScreen --file-version=1.0.0.0 --product-version=1.0.0.0 --output-dir=dist_nuitka --output-filename=LuScreen.exe --assume-yes-for-downloads main.py
+Nuitka-Plugins:WARNING: numpy: This plugin has been deprecated, do not enable it anymore.
+Nuitka: Starting Python compilation with:
+Nuitka:   Version '2.8.9' on Python 3.13 (flavor 'CPython Official') commercial grade 'not installed'.
+Nuitka: Completed Python level compilation and optimization.
+Nuitka: Generating source code for C backend compiler.
+Nuitka: Running data composer tool for optimal constant value handling.
+Nuitka: Running C compilation via Scons.
+Nuitka-Scons: MSVC version resolved to 14.3.
+Nuitka-Scons: Backend C compiler: cl (cl 14.3).
+Nuitka-Scons: Backend C linking with 398 files (no progress information available for this stage).
+Nuitka-Scons: Compiled 398 C files using clcache with 394 cache hits and 4 cache misses.
+Nuitka-Postprocessing: File 'assets/icon.png' is not in Windows icon format, converting to it.
+Nuitka-Postprocessing: Adding 7 icon(s) from icon file 'assets/icon.png'.
+Nuitka-Plugins:pyside6: Including Qt plugins 'iconengines,imageformats,multimedia,platforms,styles,tls' below 'PySide6\qt-plugins'.
+Nuitka-Plugins:dll-files: Found 1 file DLLs from _soundfile_data installation.
+Nuitka-Plugins:dll-files: Found 1 file DLLs from cv2 installation.
+Nuitka-Plugins:dll-files: Found 1 file DLLs from imageio_ffmpeg installation.
+Nuitka-Plugins:dll-files: Found 4 files DLLs from shiboken6 installation.
+Nuitka-Options: Included data file 'ffmpeg.exe' due to specified data file 'C:\Python313\Lib\site-packages\imageio_ffmpeg\binaries\ffmpeg-win-x86_64-v7.1.exe=ffmpeg.exe' on command line.
+Nuitka-Options: Included data file 'assets\LuScreen-0-175-255.png' due to specified data dir 'assets' on command line.
+Nuitka-Options: Included data file 'assets\cursor.png' due to specified data dir 'assets' on command line.
+Nuitka-Options: Included data file 'assets\icon.png' due to specified data dir 'assets' on command line.
+Nuitka-Options: Included data file 'assets\icon2.png' due to specified data dir 'assets' on command line.
+Nuitka-Options: Included data file 'assets\icon4.png' due to specified data dir 'assets' on command line.
+Nuitka-Options: Included data file 'assets\logo1.png' due to specified data dir 'assets' on command line.
+Nuitka-Options: Included data file 'assets\logo2.psd' due to specified data dir 'assets' on command line.
+Nuitka-Options: Included data file 'assets\logo3.psd' due to specified data dir 'assets' on command line.
+Nuitka-Options: Included data file 'soundcard\coreaudio.py.h' due to package 'soundcard' package data.
+Nuitka-Options: Included data file 'soundcard\mediafoundation.py.h' due to package 'soundcard' package data.
+Nuitka-Options: Included data file 'soundcard\pulseaudio.py.h' due to package 'soundcard' package data.
+Nuitka-Onefile: Creating single file from dist folder, this may take a while.
+Nuitka-Onefile: Running bootstrap binary compilation via Scons.
+Nuitka-Scons: MSVC version resolved to 14.3.
+Nuitka-Scons: Onefile C compiler: cl (cl 14.3).
+Nuitka-Scons: Onefile C linking.
+Nuitka-Scons: Compiled 1 C files using clcache with 1 cache hits and 0 cache misses.
+Nuitka-Postprocessing: File 'assets/icon.png' is not in Windows icon format, converting to it.
+Nuitka-Postprocessing: Adding 7 icon(s) from icon file 'assets/icon.png'.
+Nuitka-Onefile: Using compression for onefile payload.
+Nuitka-Onefile: Onefile payload compression ratio (27.74%) size 442972583 to 122892446.
+Nuitka-Onefile: Keeping onefile build directory 'dist_nuitka\main.onefile-build'.
+Nuitka: Keeping dist folder 'dist_nuitka\main.dist' for inspection, no need to use it.
+Nuitka: Keeping build directory 'dist_nuitka\main.build'.
+Nuitka: Successfully created 'G:\AICoding\luscreen\dist_nuitka\LuScreen.exe'.

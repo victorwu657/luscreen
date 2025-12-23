@@ -1,0 +1,11 @@
+2025-12-23 21:27:59,921 - INFO - Starting SystemAudioRecorder thread
+2025-12-23 21:27:59,923 - INFO - Target filename: G:\AICoding\luscreen\recordings\temp_audio_sys_20251223_212759.wav
+2025-12-23 21:28:00,001 - INFO - Successfully imported soundcard
+2025-12-23 21:28:00,041 - INFO - Default speaker found: 扬声器 (High Definition Audio Device) (ID: {0.0.0.00000000}.{b487c8e3-76e0-4a72-9dbb-c300a0c2f2e0})
+2025-12-23 21:28:00,042 - INFO - Attempting to get mic by ID: {0.0.0.00000000}.{b487c8e3-76e0-4a72-9dbb-c300a0c2f2e0}
+2025-12-23 21:28:00,051 - INFO - Successfully got mic by ID
+2025-12-23 21:28:00,052 - INFO - Recording from: 扬声器 (High Definition Audio Device)
+2025-12-23 21:28:15,299 - INFO - Stop requested
+2025-12-23 21:28:15,325 - INFO - Recording loop finished, saving file...
+2025-12-23 21:28:15,328 - INFO - Applying gain: 3.00x
+2025-12-23 21:28:15,340 - INFO - System audio saved to G:\AICoding\luscreen\recordings\temp_audio_sys_20251223_212759.wav

@@ -1,0 +1,21 @@
+{
+    "mic_index": 1,
+    "mic_enabled": true,
+    "sys_audio_enabled": true,
+    "cam_index": 1,
+    "cam_enabled": true,
+    "cam_shape": "circle",
+    "cam_border_enabled": false,
+    "mouse_enabled": true,
+    "mouse_style": "highlight",
+    "global_hotkey": "ctrl+shift+f1",
+    "hotkey_record_start": "ctrl+f1",
+    "hotkey_record_pause": "ctrl+f2",
+    "hotkey_record_stop": "ctrl+f3",
+    "save_path_capture": "G:\\AICoding\\luscreen\\captures",
+    "save_path_record": "G:\\AICoding\\luscreen\\recordings",
+    "video_quality": "2k_30",
+    "gpu_acceleration": false,
+    "mic_volume": 2.0,
+    "mic_gain": 2.0
+}
