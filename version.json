@@ -1,5 +1,5 @@
 {
-    "version": "0.029",
+    "version": "0.030",
     "url": "https://github.com/victorwu657/luscreen/releases/download/v0.028/LuScreen.exe",
-    "description": "修复了滚动截图拼接问题，增加了鼠标光标录制。"
+    "description": "修复了系统的log。"
 }
