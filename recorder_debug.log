@@ -1,0 +1,14 @@
+2025-12-25 15:44:42,423 - INFO - Starting ScreenRecorder thread
+2025-12-25 15:44:42,682 - INFO - Initializing SystemAudioRecorder...
+2025-12-25 15:44:42,692 - INFO - SystemAudioRecorder started
+2025-12-25 15:45:01,080 - INFO - Starting merge_av
+2025-12-25 15:45:01,080 - INFO - FFmpeg path: C:\Python313\Lib\site-packages\imageio_ffmpeg\binaries\ffmpeg-win-x86_64-v7.1.exe
+2025-12-25 15:45:01,081 - INFO - Has Mic: True (Path: G:\AICoding\luscreen\recordings\temp_audio_mic_20251225_154442.wav)
+2025-12-25 15:45:01,081 - INFO - Has Sys: True (Path: G:\AICoding\luscreen\recordings\temp_audio_sys_20251225_154442.wav)
+2025-12-25 16:14:27,223 - INFO - Starting ScreenRecorder thread
+2025-12-25 16:14:27,353 - INFO - Initializing SystemAudioRecorder...
+2025-12-25 16:14:27,355 - INFO - SystemAudioRecorder started
+2025-12-25 16:14:51,464 - INFO - Starting merge_av
+2025-12-25 16:14:51,464 - INFO - FFmpeg path: C:\Python313\Lib\site-packages\imageio_ffmpeg\binaries\ffmpeg-win-x86_64-v7.1.exe
+2025-12-25 16:14:51,465 - INFO - Has Mic: True (Path: G:\AICoding\luscreen\recordings\temp_audio_mic_20251225_161427.wav)
+2025-12-25 16:14:51,465 - INFO - Has Sys: True (Path: G:\AICoding\luscreen\recordings\temp_audio_sys_20251225_161427.wav)

@@ -1,0 +1,29 @@
+2025-12-23 21:27:33,512 - Global - INFO - Global logger initialized.
+2025-12-23 21:27:45,605 - CameraWidget - INFO - Initializing CameraWidget with index: 1
+2025-12-23 21:27:45,606 - CameraWidget - INFO - Attempting to start camera index: 1
+2025-12-23 21:27:46,400 - CameraWidget - INFO - Available QMediaDevices: ['WeCam', 'HIK 2K Camera']
+2025-12-23 21:27:46,633 - CameraWidget - INFO - Camera 1 opened successfully.
+2025-12-23 21:27:46,633 - CameraWidget - INFO - Camera Properties - Width: 640.0, Height: 480.0, FPS: 0.0
+2025-12-23 21:27:47,661 - CameraWidget - DEBUG - Frame 0: read success=True, shape=(480, 640, 3)
+2025-12-23 21:27:47,855 - CameraWidget - DEBUG - Frame 1: read success=True, shape=(480, 640, 3)
+2025-12-23 21:27:47,885 - CameraWidget - DEBUG - Frame 2: read success=True, shape=(480, 640, 3)
+2025-12-23 21:27:47,933 - CameraWidget - DEBUG - Frame 3: read success=True, shape=(480, 640, 3)
+2025-12-23 21:27:47,965 - CameraWidget - DEBUG - Frame 4: read success=True, shape=(480, 640, 3)
+2025-12-23 21:27:59,751 - ScreenRecorder - INFO - Starting ScreenRecorder thread
+2025-12-23 21:27:59,915 - ScreenRecorder - INFO - Initializing SystemAudioRecorder...
+2025-12-23 21:27:59,921 - ScreenRecorder - INFO - SystemAudioRecorder started
+2025-12-23 21:27:59,921 - SystemAudioRecorder - INFO - Starting SystemAudioRecorder thread
+2025-12-23 21:27:59,923 - SystemAudioRecorder - INFO - Target filename: G:\AICoding\luscreen\recordings\temp_audio_sys_20251223_212759.wav
+2025-12-23 21:28:00,001 - SystemAudioRecorder - INFO - Successfully imported soundcard
+2025-12-23 21:28:00,041 - SystemAudioRecorder - INFO - Default speaker found: 扬声器 (High Definition Audio Device) (ID: {0.0.0.00000000}.{b487c8e3-76e0-4a72-9dbb-c300a0c2f2e0})
+2025-12-23 21:28:00,042 - SystemAudioRecorder - INFO - Attempting to get mic by ID: {0.0.0.00000000}.{b487c8e3-76e0-4a72-9dbb-c300a0c2f2e0}
+2025-12-23 21:28:00,051 - SystemAudioRecorder - INFO - Successfully got mic by ID
+2025-12-23 21:28:00,052 - SystemAudioRecorder - INFO - Recording from: 扬声器 (High Definition Audio Device)
+2025-12-23 21:28:15,299 - SystemAudioRecorder - INFO - Stop requested
+2025-12-23 21:28:15,325 - SystemAudioRecorder - INFO - Recording loop finished, saving file...
+2025-12-23 21:28:15,328 - SystemAudioRecorder - INFO - Applying gain: 3.00x
+2025-12-23 21:28:15,340 - SystemAudioRecorder - INFO - System audio saved to G:\AICoding\luscreen\recordings\temp_audio_sys_20251223_212759.wav
+2025-12-23 21:28:15,341 - ScreenRecorder - INFO - Starting merge_av
+2025-12-23 21:28:15,341 - ScreenRecorder - INFO - FFmpeg path: C:\Python313\Lib\site-packages\imageio_ffmpeg\binaries\ffmpeg-win-x86_64-v7.1.exe
+2025-12-23 21:28:15,342 - ScreenRecorder - INFO - Has Mic: True (Path: G:\AICoding\luscreen\recordings\temp_audio_mic_20251223_212759.wav)
+2025-12-23 21:28:15,342 - ScreenRecorder - INFO - Has Sys: True (Path: G:\AICoding\luscreen\recordings\temp_audio_sys_20251223_212759.wav)

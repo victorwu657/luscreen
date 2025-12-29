@@ -1,0 +1,11 @@
+
+==============================
+Crash Time: 2025-12-25 15:41:55.702245
+Traceback (most recent call last):
+  File "G:\AICoding\luscreen\main.py", line 762, in <module>
+    app.run()
+    ~~~~~~~^^
+  File "G:\AICoding\luscreen\main.py", line 755, in run
+    sys.exit(self.app.exec())
+             ^^^^^^^^
+AttributeError: 'LuScreenApp' object has no attribute 'app'
