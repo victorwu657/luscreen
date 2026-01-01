@@ -1,0 +1,15 @@
+PySide6
+opencv-python
+mss
+numpy
+pyaudio
+imageio
+imageio-ffmpeg
+qdarktheme
+keyboard
+soundcard
+pynput
+soundfile
+requests
+rapidocr_onnxruntime
+pyperclip

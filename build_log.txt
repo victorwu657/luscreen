@@ -1,0 +1,41 @@
+Nuitka-Options: Used command line options:
+Nuitka-Options:   --standalone --msvc=latest --lto=yes --plugin-enable=pyside6 --plugin-enable=numpy --include-qt-plugins=multimedia --include-package=soundcard --include-package-data=soundcard --include-package=soundfile --include-package=requests --nofollow-import-to=setuptools --include-data-dir=assets=assets --include-data-file=C:\Python313\Lib\site-packages\imageio_ffmpeg\binaries\ffmpeg-win-x86_64-v7.1.exe=ffmpeg.exe --windows-console-mode=force --windows-icon-from-ico=assets/icon.png --company-name=LuScreen --product-name=LuScreen --file-version=1.0.0.0 --product-version=1.0.0.0 --output-dir=dist_nuitka --assume-yes-for-downloads main.py
+Nuitka-Plugins:WARNING: numpy: This plugin has been deprecated, do not enable it anymore.
+Nuitka: Starting Python compilation with:
+Nuitka:   Version '2.8.9' on Python 3.13 (flavor 'CPython Official') commercial grade 'not installed'.
+Nuitka: Completed Python level compilation and optimization.
+Nuitka: Generating source code for C backend compiler.
+Nuitka: Running data composer tool for optimal constant value handling.
+Nuitka: Running C compilation via Scons.
+Nuitka-Scons: MSVC version resolved to 14.3.
+Nuitka-Scons: Backend C compiler: cl (cl 14.3).
+Nuitka-Scons: Backend C linking with 464 files (no progress information available for this stage).
+Nuitka-Scons: Compiled 464 C files using clcache with 464 cache hits and 0 cache misses.
+Nuitka-Postprocessing: File 'assets/icon.png' is not in Windows icon format, converting to it.
+Nuitka-Postprocessing: Adding 7 icon(s) from icon file 'assets/icon.png'.
+Nuitka-Plugins:pyside6: Including Qt plugins 'iconengines,imageformats,multimedia,platforms,styles,tls' below 'PySide6\qt-plugins'.
+Nuitka-Plugins:dll-files: Found 1 file DLLs from _soundfile_data installation.
+Nuitka-Plugins:dll-files: Found 1 file DLLs from cv2 installation.
+Nuitka-Plugins:dll-files: Found 1 file DLLs from imageio_ffmpeg installation.
+Nuitka-Plugins:dll-files: Found 4 files DLLs from shiboken6 installation.
+Nuitka-Options: Included data file 'ffmpeg.exe' due to specified data file 'C:\Python313\Lib\site-packages\imageio_ffmpeg\binaries\ffmpeg-win-x86_64-v7.1.exe=ffmpeg.exe' on command line.
+Nuitka-Options: Included data file 'assets\LuScreen-0-175-255.png' due to specified data dir 'assets' on command line.
+Nuitka-Options: Included data file 'assets\cursor.png' due to specified data dir 'assets' on command line.
+Nuitka-Options: Included data file 'assets\icon.png' due to specified data dir 'assets' on command line.
+Nuitka-Options: Included data file 'assets\icon2.png' due to specified data dir 'assets' on command line.
+Nuitka-Options: Included data file 'assets\icon4.png' due to specified data dir 'assets' on command line.
+Nuitka-Options: Included data file 'assets\logo1.png' due to specified data dir 'assets' on command line.
+Nuitka-Options: Included data file 'assets\logo2.psd' due to specified data dir 'assets' on command line.
+Nuitka-Options: Included data file 'assets\logo3.psd' due to specified data dir 'assets' on command line.
+Nuitka-Options: Included data file 'soundcard\coreaudio.py.h' due to package 'soundcard' package data.
+Nuitka-Options: Included data file 'soundcard\mediafoundation.py.h' due to package 'soundcard' package data.
+Nuitka-Options: Included data file 'soundcard\pulseaudio.py.h' due to package 'soundcard' package data.
+Nuitka-Plugins:data-files: Included data file 'certifi\cacert.pem' due to package data for 'certifi'.
+Nuitka: Keeping build directory 'dist_nuitka\main.build'.
+Nuitka: Successfully created 'G:\AICoding\luscreen\dist_nuitka\main.dist\main.exe'.
+
+[2/2] Packaging to ZIP...
+Error: Build directory not found: G:\AICoding\luscreen\dist_nuitka\LuScreen.dist
+Please run build_nuitka.bat first.
+Packaging failed!
+请按任意键继续. . . 

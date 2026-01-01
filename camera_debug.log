@@ -1,0 +1,20 @@
+2026-01-01 19:31:01,871 - INFO - Initializing CameraWidget with index: 1
+2026-01-01 19:31:01,871 - INFO - Attempting to start camera index: 1
+2026-01-01 19:31:02,600 - INFO - Available QMediaDevices: ['WeCam', 'HIK 2K Camera']
+2026-01-01 19:31:02,831 - INFO - Camera 1 opened successfully.
+2026-01-01 19:31:02,831 - INFO - Camera Properties - Width: 640.0, Height: 480.0, FPS: 0.0
+2026-01-01 19:31:03,476 - DEBUG - Frame 0: read success=True, shape=(480, 640, 3)
+2026-01-01 19:31:03,523 - DEBUG - Frame 1: read success=True, shape=(480, 640, 3)
+2026-01-01 19:31:03,555 - DEBUG - Frame 2: read success=True, shape=(480, 640, 3)
+2026-01-01 19:31:03,603 - DEBUG - Frame 3: read success=True, shape=(480, 640, 3)
+2026-01-01 19:31:03,635 - DEBUG - Frame 4: read success=True, shape=(480, 640, 3)
+2026-01-01 19:31:52,091 - INFO - Initializing CameraWidget with index: 1
+2026-01-01 19:31:52,092 - INFO - Attempting to start camera index: 1
+2026-01-01 19:31:52,092 - INFO - Available QMediaDevices: ['WeCam', 'HIK 2K Camera']
+2026-01-01 19:31:52,288 - INFO - Camera 1 opened successfully.
+2026-01-01 19:31:52,288 - INFO - Camera Properties - Width: 640.0, Height: 480.0, FPS: 0.0
+2026-01-01 19:31:52,981 - DEBUG - Frame 0: read success=True, shape=(480, 640, 3)
+2026-01-01 19:31:53,027 - DEBUG - Frame 1: read success=True, shape=(480, 640, 3)
+2026-01-01 19:31:53,059 - DEBUG - Frame 2: read success=True, shape=(480, 640, 3)
+2026-01-01 19:31:53,107 - DEBUG - Frame 3: read success=True, shape=(480, 640, 3)
+2026-01-01 19:31:53,139 - DEBUG - Frame 4: read success=True, shape=(480, 640, 3)
