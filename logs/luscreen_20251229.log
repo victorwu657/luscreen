@@ -1,3 +1,0 @@
-2025-12-29 23:58:06,679 - Global - INFO - Global logger initialized. Version: 0.032
-2025-12-29 23:58:10,464 - urllib3.connectionpool - DEBUG - Starting new HTTPS connection (1): raw.githubusercontent.com:443
-2025-12-29 23:58:11,308 - urllib3.connectionpool - DEBUG - https://raw.githubusercontent.com:443 "GET /victorwu657/luscreen/main/version.json?t=1767023890 HTTP/1.1" 200 161

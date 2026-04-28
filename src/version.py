@@ -1,3 +1,3 @@
-APP_VERSION = "0.043"
-# 您需要将此 URL 替换为您的实际版本文件地址 (例如 GitHub Pages, Gitee, 或您的官网)
-UPDATE_URL = "https://raw.githubusercontent.com/victorwu657/luscreen/main/version.json"
+APP_VERSION = "0.046.9"
+# 自动更新检查地址
+UPDATE_URL = "https://luscreen.com/downloads/version.json"

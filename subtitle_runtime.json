@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "url": "https://luscreen.com/downloads/subtitle_runtime.zip",
+  "sha256": "",
+  "notes": "字幕组件包：包含 whisperx/torch 等运行时依赖；首次使用字幕功能时由软件内一键下载并安装。"
+}

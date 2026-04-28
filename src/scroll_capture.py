@@ -99,6 +99,10 @@ class ScrollCaptureWorker(QThread):
 
                     curr_img = self.capture_frame(sct, phys_region)
                     
+                    if curr_img is None:
+                        print("Failed to capture frame, skipping...")
+                        continue
+
                     # 2. 实时去重检测 (判断到底)
                     if self.is_duplicate(last_img, curr_img):
                         print("Reached bottom (duplicate content)")
@@ -140,9 +144,20 @@ class ScrollCaptureWorker(QThread):
             self.error.emit(str(e))
 
     def capture_frame(self, sct, region):
-        img = sct.grab(region)
-        frame = np.array(img)
-        return frame[:,:,:3] # RGB only
+        try:
+            img = sct.grab(region)
+            frame = np.array(img)
+            return frame[:,:,:3] # RGB only
+        except Exception as e:
+            print(f"Capture frame failed: {e}")
+            # 如果是资源冲突，稍微等待一下重试一次
+            time.sleep(0.1)
+            try:
+                img = sct.grab(region)
+                frame = np.array(img)
+                return frame[:,:,:3]
+            except:
+                return None
 
     def is_duplicate(self, img1, img2):
         # 比较最后 100 行是否一致

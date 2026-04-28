@@ -118,47 +118,57 @@ class ControlBar(QWidget):
             print(f"Error excluding window from capture: {e}")
 
     def move_out_of_region(self):
-        # 尝试将控制条放在录制区域下方
+        # 用户要求：
+        # 1. 默认放在最下面中间，贴近任务栏
+        # 2. 如果跟录制区域冲突，则放在右下角
+        
         screen = QApplication.primaryScreen().geometry()
-        
-        # 区域底部坐标
-        region_bottom = self.recording_region.get('top') + self.recording_region.get('height')
-        region_top = self.recording_region.get('top')
-        region_center_x = self.recording_region.get('left') + self.recording_region.get('width') // 2
-        
         bar_w = self.width()
         bar_h = self.height()
         
-        # 计算水平位置：居中于录制区域
-        x = region_center_x - bar_w // 2
+        # 默认位置：屏幕底部居中，预留一点任务栏空间 (例如 60px)
+        # 通常任务栏高度在 40-60px 之间
+        taskbar_height = 60 
+        default_x = screen.width() // 2 - bar_w // 2
+        default_y = screen.height() - bar_h - taskbar_height
         
-        # 垂直位置策略：
-        # 1. 优先放在区域下方 (加一点间距 20px)
-        y = region_bottom + 20
+        # 检查是否与录制区域冲突
+        # 定义控制条的矩形
+        from PySide6.QtCore import QRect
+        bar_rect = QRect(default_x, default_y, bar_w, bar_h)
         
-        # 2. 如果下方超出屏幕，放在区域上方
-        if y + bar_h > screen.height():
-            y = region_top - bar_h - 20
-            
-        # 3. 如果上方也超出屏幕（全屏录制），或者就在区域内部底部
-        #    注意：如果全屏录制，确实很难不遮挡。
-        #    作为妥协，放在屏幕右下角，或者顶部中间，但用户要求“不要录进去”
-        #    这对于全屏录制几乎是不可能的，除非最小化到托盘。
-        #    这里我们尽可能放在角落，或者提示用户。
+        # 获取录制区域矩形
+        region_rect = QRect(
+            self.recording_region.get('left'),
+            self.recording_region.get('top'),
+            self.recording_region.get('width'),
+            self.recording_region.get('height')
+        )
         
-        if y < 0: 
-            # 全屏情况，放在顶部，但可能会被录进去。
-            # 唯一的办法是让 mss 忽略这个窗口，但这很复杂。
-            # 或者我们将控制条放在屏幕边缘之外？不行，那样用户点不到停止。
-            # 妥协方案：放在屏幕右下角，尽量减少干扰
-            y = screen.height() - bar_h - 50
-            x = screen.width() - bar_w - 50
+        final_x, final_y = default_x, default_y
+        
+        # 如果冲突（有交集）
+        if bar_rect.intersects(region_rect):
+            # 尝试方案2：右下角
+            # 同样预留任务栏高度
+            alt_x = screen.width() - bar_w - 20 # 右边留 20px 边距
+            alt_y = screen.height() - bar_h - taskbar_height
             
-        # 确保 x 在屏幕内
-        if x < 0: x = 10
-        if x + bar_w > screen.width(): x = screen.width() - bar_w - 10
+            # 再次检查右下角是否也冲突？
+            # 用户只说了“第二选择放在右边最下角”，没说如果还冲突怎么办。
+            # 通常右下角冲突意味着全屏录制或者大区域录制。
+            # 如果是全屏录制，放哪都会遮挡，除非放外面。
+            # 我们就按用户说的，冲突就去右下角。
+            final_x = alt_x
+            final_y = alt_y
             
-        self.move(x, y)
+        # 确保坐标在屏幕内
+        if final_x < 0: final_x = 0
+        if final_x + bar_w > screen.width(): final_x = screen.width() - bar_w
+        if final_y < 0: final_y = 0
+        if final_y + bar_h > screen.height(): final_y = screen.height() - bar_h
+            
+        self.move(final_x, final_y)
 
     def on_pause_clicked(self):
         self.pause_clicked.emit()

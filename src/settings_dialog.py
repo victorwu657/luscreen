@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QLineEdit, QPushButton, QFileDialog, QGroupBox,
                                QListWidget, QStackedWidget, QWidget, QComboBox, 
                                QCheckBox, QFormLayout, QFrame, QKeySequenceEdit,
-                               QScrollArea, QMessageBox, QApplication)
+                               QScrollArea, QMessageBox, QApplication, QInputDialog)
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QIcon, QFont, QKeySequence, QPixmap
 import os
@@ -215,12 +215,12 @@ class SettingsDialog(QDialog):
         layout.addWidget(line)
         
         # 视频质量设置
-        layout.addWidget(QLabel("视频导出质量 (Video Quality):"))
+        layout.addWidget(QLabel("录制视频质量 (Recording Quality):"))
         self.combo_quality = QComboBox()
-        # 1080p/2k 30FPS 免费; 4k 60FPS VIP
-        self.combo_quality.addItem("1080p, 30FPS (Free)", "1080p_30")
-        self.combo_quality.addItem("2K, 30FPS (Free)", "2k_30")
-        self.combo_quality.addItem("4K, 60FPS (VIP 👑)", "4k_60")
+        # 1080p/2k 30FPS; 4k 60FPS
+        self.combo_quality.addItem("1080p, 30FPS", "1080p_30")
+        self.combo_quality.addItem("2K, 30FPS", "2k_30")
+        self.combo_quality.addItem("4K, 60FPS", "4k_60")
         
         current_quality = self.config_manager.get("video_quality", "1080p_30")
         # 兼容旧配置
@@ -237,10 +237,19 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.combo_quality)
         
         # GPU 加速设置
-        gpu_text = "启用 NVIDIA GPU 硬件加速 (NVENC) - VIP 👑"
+        self.license_manager = LicenseManager()
+        gpu_text = "启用 NVIDIA GPU 硬件加速 (NVENC) [Pro版功能]"
         self.cb_gpu = QCheckBox(gpu_text)
         self.cb_gpu.setChecked(self.config_manager.get("gpu_acceleration", False))
         self.cb_gpu.toggled.connect(self.on_gpu_changed)
+        
+        # License check for GPU
+        if not self.license_manager.can_use_gpu():
+            self.cb_gpu.setEnabled(False)
+            self.cb_gpu.setToolTip("GPU 加速仅限 Pro 版用户使用")
+            if self.cb_gpu.isChecked():
+                self.cb_gpu.setChecked(False) # 强制关闭
+        
         layout.addWidget(self.cb_gpu)
 
         # 检测并显示 GPU 信息
@@ -455,30 +464,81 @@ class SettingsDialog(QDialog):
         
         layout.addLayout(header_layout)
         
-        info_label = QLabel(f"版本: v{APP_VERSION}\n构建日期: {datetime.now().strftime('%Y-%m-%d')}")
+        # Version & License Info
+        version_text = f"版本: v{APP_VERSION}\n构建日期: {datetime.now().strftime('%Y-%m-%d')}"
+        if self.license_manager.is_pro:
+            version_text += "\n\n👑 Pro 专业版 (已激活)"
+        else:
+            version_text += "\n\n(免费版)"
+            
+        info_label = QLabel(version_text)
         info_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(info_label)
+        
+        # 按钮容器
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        # 激活 Pro 按钮
+        if not self.license_manager.is_pro:
+            btn_activate = QPushButton("激活 Pro 版")
+            btn_activate.setFixedWidth(120)
+            btn_activate.setStyleSheet("background-color: #007aff; color: white; font-weight: bold;")
+            btn_activate.setCursor(Qt.PointingHandCursor)
+            btn_activate.clicked.connect(self.activate_pro_dialog)
+            btn_layout.addWidget(btn_activate)
+            btn_layout.addSpacing(20)
+        else:
+            # 注销按钮 (用于测试)
+            btn_deactivate = QPushButton("注销激活")
+            btn_deactivate.setFixedWidth(120)
+            btn_deactivate.setStyleSheet("background-color: #d9534f; color: white;")
+            btn_deactivate.setCursor(Qt.PointingHandCursor)
+            btn_deactivate.setToolTip("移除当前激活码，恢复为免费版")
+            btn_deactivate.clicked.connect(self.deactivate_pro)
+            btn_layout.addWidget(btn_deactivate)
+            btn_layout.addSpacing(20)
         
         # 检查更新按钮
         btn_check = QPushButton("检查更新")
         btn_check.setFixedWidth(120)
         btn_check.setCursor(Qt.PointingHandCursor)
         btn_check.clicked.connect(self.check_for_updates)
-        
-        # 居中放置按钮
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
         btn_layout.addWidget(btn_check)
+        
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
         
-        update_label = QLabel("软件更新: GitHub Release")
+        update_label = QLabel("软件更新: Luscreen.com")
         update_label.setAlignment(Qt.AlignCenter)
         update_label.setStyleSheet("color: #aaa; margin-top: 10px;")
         layout.addWidget(update_label)
         
         layout.addStretch()
         return page
+
+    def activate_pro_dialog(self):
+        text, ok = QInputDialog.getText(self, "激活 Pro 版", "请输入激活码 (License Key):")
+        if ok and text:
+            if self.license_manager.activate_pro(text):
+                QMessageBox.information(self, "激活成功", "恭喜！您已成功激活 Pro 专业版。\n请重启软件以解锁所有功能。")
+                # Reload current page to update UI
+                self.pages.removeWidget(self.pages.currentWidget())
+                self.pages.insertWidget(6, self.create_about_page())
+                self.pages.setCurrentIndex(6)
+            else:
+                reason = getattr(self.license_manager, "last_error", "") or "无效的激活码，请检查后重试。"
+                QMessageBox.warning(self, "激活失败", reason)
+
+    def deactivate_pro(self):
+        reply = QMessageBox.question(self, "注销激活", "确定要注销当前的 Pro 版激活吗？\n软件将恢复为免费版限制。", QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self.license_manager.deactivate()
+            QMessageBox.information(self, "已注销", "激活已移除。")
+            # Reload UI
+            self.pages.removeWidget(self.pages.currentWidget())
+            self.pages.insertWidget(6, self.create_about_page())
+            self.pages.setCurrentIndex(6)
 
     def check_for_updates(self):
         self.update_worker = UpdateWorker(mode='check')
@@ -508,10 +568,14 @@ class SettingsDialog(QDialog):
         self.update_worker = UpdateWorker(mode='download', download_url=url)
         self.update_worker.download_progress.connect(self.progress_dialog.setValue)
         self.update_worker.download_finished.connect(self.on_download_finished)
-        self.update_worker.error.connect(lambda e: QMessageBox.warning(self, "下载失败", e))
+        self.update_worker.error.connect(self.on_download_error)
         self.update_worker.start()
         
         self.progress_dialog.canceled.connect(self.update_worker.terminate)
+
+    def on_download_error(self, error_msg):
+        self.progress_dialog.close()
+        QMessageBox.warning(self, "下载失败", f"无法下载更新包：\n{error_msg}")
 
     def on_download_finished(self):
         # 硬编码路径，避免信号传参风险
@@ -541,6 +605,8 @@ class SettingsDialog(QDialog):
             if install_update(file_path):
                 # 成功启动更新脚本后，主动退出程序
                 QApplication.quit()
+            else:
+                QMessageBox.critical(self, "更新失败", "安装更新失败，请查看 logs/update_log.txt 获取详情。")
 
     def create_contact_page(self):
         page, layout = self.create_page_container("合作联系")
@@ -548,12 +614,35 @@ class SettingsDialog(QDialog):
         contact_info = QLabel(
             "如果您有任何问题或合作意向，请联系我们：\n\n"
             "📧 邮箱: 76697742@qq.com\n"
-            "🌐 官网: www.luscreen.com（在建）\n"
-            "💬 微信: wuhui8118（交流群）"
+            "🌐 官网: www.luscreen.com\n"
+            "💬 微信: wuhui8118（加入交流群）"
         )
         contact_info.setStyleSheet("font-size: 16px; line-height: 150%;")
         contact_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(contact_info)
+        
+        # 二维码
+        qr_label = QLabel()
+        qr_label.setAlignment(Qt.AlignCenter)
+        
+        try:
+            base_path = sys._MEIPASS
+        except Exception:
+            base_path = os.getcwd()
+            
+        qr_path = os.path.join(base_path, "assets", "qrcode.png")
+        
+        if os.path.exists(qr_path):
+            pixmap = QPixmap(qr_path)
+            # 缩放图片到合适大小，例如 200x200
+            pixmap = pixmap.scaled(200, 200, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            qr_label.setPixmap(pixmap)
+            layout.addWidget(qr_label)
+            
+            qr_desc = QLabel("扫码加入交流群")
+            qr_desc.setAlignment(Qt.AlignCenter)
+            qr_desc.setStyleSheet("color: #888; font-size: 12px; margin-top: 5px;")
+            layout.addWidget(qr_desc)
         
         layout.addStretch()
         return page
@@ -610,18 +699,34 @@ class SettingsDialog(QDialog):
     def on_quality_changed(self, index):
         quality = self.combo_quality.currentData()
         
-        if quality == "4k_60":
-            if not self.license_manager.check_feature_access(LicenseManager.FEATURE_4K):
-                QMessageBox.information(self, "VIP 功能", self.license_manager.get_upgrade_message())
-                # Revert to 1080p
-                self.combo_quality.setCurrentIndex(0) # 0 is 1080p
-                return
+        # License Check
+        target_res = "1080p"
+        target_fps = 30
+        
+        if "4k" in quality: target_res = "4k"
+        elif "2k" in quality: target_res = "2k"
+        
+        if "60" in quality: target_fps = 60
+        
+        if not self.license_manager.can_use_resolution(target_res) or not self.license_manager.can_use_fps(target_fps):
+            QMessageBox.information(self, "Pro 版功能", 
+                f"您当前使用的是免费版。\n\n"
+                f"2K/4K 分辨率和 60FPS 高帧率是 Pro 版专属功能。\n"
+                f"免费版最高支持 1080p @ 30fps。")
             
+            # Reset to 1080p
+            idx_1080 = self.combo_quality.findData("1080p_30")
+            if idx_1080 >= 0:
+                self.combo_quality.setCurrentIndex(idx_1080)
+            return
+
+        if quality == "4k_60":
             # 4K 60FPS 优化逻辑
             if self.has_nvidia_gpu:
                 if not self.cb_gpu.isChecked():
-                    self.cb_gpu.setChecked(True)
-                    QMessageBox.information(self, "性能优化", "已为您自动开启 GPU 硬件加速，以确保 4K 60FPS 录制流畅。")
+                    if self.license_manager.can_use_gpu():
+                        self.cb_gpu.setChecked(True)
+                        QMessageBox.information(self, "性能优化", "已为您自动开启 GPU 硬件加速，以确保 4K 60FPS 录制流畅。")
             else:
                 QMessageBox.warning(self, "性能警告", 
                                     "您的电脑未检测到支持 NVENC 的 NVIDIA 显卡。\n\n"
@@ -632,15 +737,6 @@ class SettingsDialog(QDialog):
         self.config_manager.save()
 
     def on_gpu_changed(self, checked):
-        if checked:
-            if not self.license_manager.check_feature_access(LicenseManager.FEATURE_GPU):
-                QMessageBox.information(self, "VIP 功能", self.license_manager.get_upgrade_message())
-                # Revert checkbox
-                self.cb_gpu.blockSignals(True)
-                self.cb_gpu.setChecked(False)
-                self.cb_gpu.blockSignals(False)
-                return
-
         self.config_manager.set("gpu_acceleration", checked)
         self.config_manager.save()
 

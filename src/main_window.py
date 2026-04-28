@@ -134,6 +134,10 @@ class MainWindow(QWidget):
         self.btn_record.clicked.connect(lambda: self.trigger_action('record'))
         layout.addWidget(self.btn_record)
 
+        self.btn_video_edit = MainMenuButton("视频编辑", "🎞️")
+        self.btn_video_edit.clicked.connect(lambda: self.trigger_action('edit_video'))
+        layout.addWidget(self.btn_video_edit)
+
         self.btn_ocr = MainMenuButton("OCR取字", "📝")
         self.btn_ocr.clicked.connect(lambda: self.trigger_action('ocr'))
         layout.addWidget(self.btn_ocr)
@@ -141,6 +145,14 @@ class MainWindow(QWidget):
         self.btn_edit = MainMenuButton("智能画板", "🖼️")
         self.btn_edit.clicked.connect(lambda: self.trigger_action('edit_image'))
         layout.addWidget(self.btn_edit)
+
+        self.btn_clipboard = MainMenuButton("剪贴板", "📋")
+        self.btn_clipboard.clicked.connect(lambda: self.trigger_action('clipboard'))
+        layout.addWidget(self.btn_clipboard)
+        
+        self.btn_ai_tools = MainMenuButton("AI 工具", "🤖")
+        self.btn_ai_tools.clicked.connect(lambda: self.trigger_action('ai_tools'))
+        layout.addWidget(self.btn_ai_tools)
         
         layout.addSpacing(5)
         line2 = QFrame()
@@ -164,6 +176,10 @@ class MainWindow(QWidget):
         import time
         QApplication.processEvents()
         time.sleep(0.2)
+        
+        # 针对 'capture_full' 动作，我们可以传递一个额外的标志给 Controller
+        # 但这里只发射字符串信号。具体的摄像头位置逻辑需要在 Controller 中处理。
+        # 当从这里点击 "录制屏幕" (action='record') 时，Controller 会启动 ControlPanel
         
         self.action_triggered.emit(action)
 

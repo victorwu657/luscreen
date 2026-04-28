@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "whisper-large-v3",
+      "backend": "whisperx",
+      "display_name": "Whisper Large v3（推荐）",
+      "model": "large-v3",
+      "allow_cpu": true,
+      "allow_gpu": true
+    },
+    {
+      "id": "whisper-medium",
+      "backend": "whisperx",
+      "display_name": "Whisper Medium（CPU 友好）",
+      "model": "medium",
+      "allow_cpu": true,
+      "allow_gpu": true
+    },
+    {
+      "id": "whisper-small",
+      "backend": "whisperx",
+      "display_name": "Whisper Small（更快）",
+      "model": "small",
+      "allow_cpu": true,
+      "allow_gpu": true
+    }
+  ]
+}
+

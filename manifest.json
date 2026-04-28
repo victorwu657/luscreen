@@ -1,0 +1,30 @@
+{
+  "version": "1.0",
+  "update_time": "2026-03-13",
+  "models": {
+    "whisperx-small": {
+      "display_name": "小型模型 (推荐)",
+      "description": "适合大多数场景，速度快",
+      "size_mb": 852,
+      "url": "https://luscreen.com/downloads/models/whisperx-small.zip",
+      "md5": "ab7f38c421cdc900a7dd61507290c25d",
+      "min_app_version": "0.046.0"
+    },
+    "whisperx-medium": {
+      "display_name": "中等模型",
+      "description": "更高准确度，速度较慢",
+      "size_mb": 769,
+      "url": "https://luscreen.com/downloads/models/whisperx-medium.zip",
+      "md5": "请替换为实际MD5值",
+      "min_app_version": "0.046.0"
+    },
+    "whisperx-large-v2": {
+      "display_name": "大型模型",
+      "description": "最高准确度，需要较强性能",
+      "size_mb": 1550,
+      "url": "https://luscreen.com/downloads/models/whisperx-large-v2.zip",
+      "md5": "请替换为实际MD5值",
+      "min_app_version": "0.046.0"
+    }
+  }
+}

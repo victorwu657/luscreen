@@ -1,14 +1,77 @@
 import sys
 import os
+import subprocess
+import faulthandler
+from datetime import datetime
+
+if "--subtitle-service" in sys.argv:
+    import importlib
+    _mod = importlib.import_module("src.subtitle_system.service_process")
+    print(f"[SubtitleServiceMain] argv={sys.argv!r}")
+    print(f"[SubtitleServiceMain] executable={sys.executable!r}")
+    print(f"[SubtitleServiceMain] cwd={os.getcwd()!r}")
+    raise SystemExit(_mod.main())
+
+if "--subtitle-worker" in sys.argv:
+    import importlib
+    _mod = importlib.import_module("src.subtitle_system.worker_process")
+    print(f"[SubtitleWorkerMain] argv={sys.argv!r}")
+    print(f"[SubtitleWorkerMain] executable={sys.executable!r}")
+    print(f"[SubtitleWorkerMain] cwd={os.getcwd()!r}")
+    raise SystemExit(_mod.main())
+
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("QT_DISABLE_HW_TEXTURES_CONVERSION", "1")
+os.environ.setdefault("QT_FFMPEG_DECODING_HW_DEVICE_TYPES", ",")
+
+try:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    logs_dir = os.path.join(base_dir, "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    fault_path = os.path.join(logs_dir, f"faulthandler_{datetime.now().strftime('%Y%m%d')}.log")
+    faulthandler.enable(open(fault_path, "a", encoding="utf-8"))
+except Exception:
+    pass
 # 初始化全局日志和异常捕获
 from src.logger import setup_global_logger, handle_exception
 # 立即安装钩子
 sys.excepthook = handle_exception
-# 初始化日志记录器
-logger = setup_global_logger()
+# 初始化日志记录器 (启用 stdout/stderr 重定向)
+logger = setup_global_logger(redirect_stdout=True)
 
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox, QWidget, QFileDialog
-from PySide6.QtCore import Qt, QTimer, QSharedMemory, QRect
+from PySide6.QtCore import Qt, QTimer, QSharedMemory, QRect, qInstallMessageHandler, QtMsgType
+
+def qt_message_handler(mode, context, message):
+    """
+    Custom Qt message handler to intercept and filter warnings.
+    """
+    # Filter out specific libpng warnings
+    if "libpng warning: eXIf: duplicate" in message:
+        return
+        
+    import logging
+    qt_logger = logging.getLogger("Qt")
+    
+    if mode == QtMsgType.QtDebugMsg:
+        qt_logger.debug(message)
+    elif mode == QtMsgType.QtInfoMsg:
+        qt_logger.info(message)
+    elif mode == QtMsgType.QtWarningMsg:
+        qt_logger.warning(message)
+    elif mode == QtMsgType.QtCriticalMsg:
+        qt_logger.error(message)
+    elif mode == QtMsgType.QtFatalMsg:
+        qt_logger.critical(message)
+
+# Install the handler immediately
+qInstallMessageHandler(qt_message_handler)
 from PySide6.QtGui import QIcon, QAction, QCursor, QPixmap
 import mss
 import numpy as np
@@ -35,6 +98,60 @@ from src.updater import UpdateWorker, install_update
 from src.version import APP_VERSION
 import ctypes
 
+# Force Nuitka to detect rapidocr_onnxruntime dependency and its submodules
+try:
+    import rapidocr_onnxruntime
+    import sys
+
+    _det_mod = None
+    _rec_mod = None
+    _cls_mod = None
+    _TextDetector = None
+    _TextRecognizer = None
+    _TextClassifier = None
+
+    try:
+        import rapidocr_onnxruntime.ch_ppocr_det as _det_mod
+        import rapidocr_onnxruntime.ch_ppocr_rec as _rec_mod
+        import rapidocr_onnxruntime.ch_ppocr_cls as _cls_mod
+        from rapidocr_onnxruntime.ch_ppocr_det.text_detect import TextDetector as _TextDetector
+        from rapidocr_onnxruntime.ch_ppocr_rec.text_recognize import TextRecognizer as _TextRecognizer
+        from rapidocr_onnxruntime.ch_ppocr_cls.text_cls import TextClassifier as _TextClassifier
+        from rapidocr_onnxruntime.ch_ppocr_cls import text_cls  # noqa: F401
+        from rapidocr_onnxruntime.ch_ppocr_det import text_detect  # noqa: F401
+        from rapidocr_onnxruntime.ch_ppocr_rec import text_recognize  # noqa: F401
+    except Exception:
+        import rapidocr_onnxruntime.ch_ppocr_v3_det as _det_mod
+        import rapidocr_onnxruntime.ch_ppocr_v3_rec as _rec_mod
+        import rapidocr_onnxruntime.ch_ppocr_v2_cls as _cls_mod
+        from rapidocr_onnxruntime.ch_ppocr_v3_det.text_detect import TextDetector as _TextDetector
+        from rapidocr_onnxruntime.ch_ppocr_v3_rec.text_recognize import TextRecognizer as _TextRecognizer
+        from rapidocr_onnxruntime.ch_ppocr_v2_cls.text_cls import TextClassifier as _TextClassifier
+        from rapidocr_onnxruntime.ch_ppocr_v2_cls import text_cls  # noqa: F401
+        from rapidocr_onnxruntime.ch_ppocr_v3_det import text_detect  # noqa: F401
+        from rapidocr_onnxruntime.ch_ppocr_v3_rec import text_recognize  # noqa: F401
+
+    if _det_mod and _rec_mod and _cls_mod and _TextDetector and _TextRecognizer and _TextClassifier:
+        try:
+            _det_mod.TextDetector = _TextDetector
+            _rec_mod.TextRecognizer = _TextRecognizer
+            _cls_mod.TextClassifier = _TextClassifier
+        except Exception:
+            pass
+
+        sys.modules[_det_mod.__name__] = _det_mod
+        sys.modules[_rec_mod.__name__] = _rec_mod
+        sys.modules[_cls_mod.__name__] = _cls_mod
+
+        if _det_mod.__name__.startswith("rapidocr_onnxruntime."):
+            sys.modules[_det_mod.__name__.split(".", 1)[1]] = _det_mod
+        if _rec_mod.__name__.startswith("rapidocr_onnxruntime."):
+            sys.modules[_rec_mod.__name__.split(".", 1)[1]] = _rec_mod
+        if _cls_mod.__name__.startswith("rapidocr_onnxruntime."):
+            sys.modules[_cls_mod.__name__.split(".", 1)[1]] = _cls_mod
+except ImportError:
+    pass
+
 # Set AppUserModelID to ensure taskbar icon shows correctly
 try:
     myappid = 'luscreen.app.v1' # Arbitrary unique ID
@@ -43,17 +160,22 @@ except ImportError:
     pass
 
 # 启用高分屏支持 (High DPI Support)
-# 必须在创建 QApplication 之前设置
-if os.name == 'nt':
-    try:
-        # Windows 8.1+
-        ctypes.windll.shcore.SetProcessDpiAwareness(1) # 1 = PROCESS_SYSTEM_DPI_AWARE
-    except Exception:
-        # Windows Vista/7/8
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except:
-            pass
+# Qt 6 默认启用 High DPI 支持，手动设置会导致 "SetProcessDpiAwarenessContext() failed" 错误
+# 因此移除手动 ctypes 调用，让 Qt 自动处理
+# if os.name == 'nt':
+#     try:
+#         # Windows 8.1+
+#         ctypes.windll.shcore.SetProcessDpiAwareness(1) # 1 = PROCESS_SYSTEM_DPI_AWARE
+#     except Exception:
+#         # Windows Vista/7/8
+#         try:
+#             ctypes.windll.user32.SetProcessDPIAware()
+#         except:
+#             pass
+
+from src.clipboard_manager import ClipboardManager
+from src.clipboard_window import ClipboardWindow
+from src.ai_tools_window import AIToolsWindow
 
 class LuScreenApp:
     def __init__(self):
@@ -67,6 +189,13 @@ class LuScreenApp:
         
         # 加载配置
         self.config_manager = ConfigManager()
+
+        # 初始化剪贴板管理器
+        self.clipboard_manager = ClipboardManager()
+        self.clipboard_window = ClipboardWindow(self.clipboard_manager)
+        
+        # 初始化AI工具窗口
+        self.ai_tools_window = AIToolsWindow()
         
         # 初始化快捷键管理器
         self.hotkey_manager = HotkeyManager()
@@ -84,7 +213,9 @@ class LuScreenApp:
         self.hotkey_manager.register_hotkey("record_pause", hk_pause)
         self.hotkey_manager.register_hotkey("record_stop", hk_stop)
         
-        self.hotkey_manager.hotkey_triggered.connect(self.on_hotkey_triggered)
+        # Use QueuedConnection to ensure UI updates happen on the main thread
+        # regardless of which thread triggers the hotkey (keyboard/mouse listeners)
+        self.hotkey_manager.hotkey_triggered.connect(self.on_hotkey_triggered, Qt.QueuedConnection)
 
         # 初始化组件
         self.camera_widget = None
@@ -285,6 +416,23 @@ class LuScreenApp:
         self.action_record.triggered.connect(lambda: self.start_selection(mode='record'))
         self.tray_menu.addAction(self.action_record)
         
+        # 视频编辑
+        self.action_edit_video = QAction("🎞️  视频编辑 (Video Editor)", self.app)
+        self.action_edit_video.triggered.connect(self.open_video_editor)
+        self.tray_menu.addAction(self.action_edit_video)
+        
+        self.tray_menu.addSeparator()
+        
+        # 剪贴板
+        self.action_clipboard = QAction("📋  剪贴板 (Clipboard)", self.app)
+        self.action_clipboard.triggered.connect(lambda: self.on_main_window_action('clipboard'))
+        self.tray_menu.addAction(self.action_clipboard)
+        
+        # AI工具
+        self.action_ai_tools = QAction("🤖  AI 工具 (AI Tools)", self.app)
+        self.action_ai_tools.triggered.connect(lambda: self.on_main_window_action('ai_tools'))
+        self.tray_menu.addAction(self.action_ai_tools)
+        
         self.tray_menu.addSeparator()
         
         # 增加设置选项
@@ -360,10 +508,37 @@ class LuScreenApp:
             self.capture_fullscreen()
         elif action == 'record':
             self.start_selection(mode='record')
+        elif action == 'edit_video':
+            self.open_video_editor()
         elif action == 'ocr':
             self.start_selection(mode='ocr')
         elif action == 'edit_image':
             self.open_image_editor()
+        elif action == 'clipboard':
+            # 显示剪贴板窗口
+            # 定位到屏幕右下角，距离边缘 30px
+            screen_geo = self.app.primaryScreen().availableGeometry()
+            w = self.clipboard_window.width()
+            h = self.clipboard_window.height()
+            
+            x = screen_geo.right() - w - 30
+            y = screen_geo.bottom() - h - 30
+            
+            self.clipboard_window.move(x, y)
+            self.clipboard_window.show()
+            self.clipboard_window.activateWindow()
+        elif action == 'ai_tools':
+            # 显示AI工具窗口
+            # 居中显示
+            screen_geo = self.app.primaryScreen().availableGeometry()
+            w = self.ai_tools_window.width()
+            h = self.ai_tools_window.height()
+            x = screen_geo.center().x() - w // 2
+            y = screen_geo.center().y() - h // 2
+            
+            self.ai_tools_window.move(x, y)
+            self.ai_tools_window.show()
+            self.ai_tools_window.activateWindow()
         elif action == 'settings':
             self.open_settings()
         elif action == 'quit':
@@ -400,7 +575,123 @@ class LuScreenApp:
             self.camera_widget = None
             print("Camera closed")
 
+    def get_device_name(self, index, type_):
+        try:
+            if type_ == 'mic':
+                devices = AudioRecorder.get_input_devices()
+                for d in devices:
+                    if d['index'] == index: return d['name']
+            elif type_ == 'cam':
+                cameras = CameraWidget.get_available_cameras()
+                for c in cameras:
+                    if c['index'] == index: return c['name']
+        except:
+            pass
+        return None
+
+    def validate_device_index(self, index, name, type_):
+        """
+        Check if the device at `index` matches `name`.
+        If not, try to find `name` in current devices.
+        If not found, return default index 0.
+        """
+        try:
+            current_devices = []
+            if type_ == 'mic':
+                current_devices = AudioRecorder.get_input_devices()
+            else:
+                current_devices = CameraWidget.get_available_cameras()
+                
+            if not current_devices: return 0
+            
+            # 1. Check if index is valid and name matches
+            for d in current_devices:
+                if d['index'] == index:
+                    if name and d['name'] == name:
+                        return index # Match!
+                    if name is None:
+                        return index # Legacy config, accept current
+                    break # Index exists but name mismatch
+            
+            # 2. Try to find by name
+            if name:
+                for d in current_devices:
+                    if d['name'] == name:
+                        return d['index']
+            
+            # 3. Fallback
+            return 0
+            
+        except Exception as e:
+            print(f"Device validation error: {e}")
+            return 0
+
     def start_selection(self, mode='record'):
+        try:
+            for ed in list(getattr(self, "editors", []) or []):
+                try:
+                    if hasattr(ed, "prop_panel") and ed.prop_panel:
+                        ed.prop_panel.hide()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Check if selection widget already exists
+        if self.selection_widget is not None:
+            print(f"DEBUG: Selection widget already open, bringing to front. Mode: {mode}")
+            
+            # If switching modes, update the mode? 
+            # The user requirement implies "don't open a second one", but maybe they want to switch mode?
+            # Assuming "click Record Screen" means "I want to record". 
+            # If it's already open, just showing it is enough.
+            # But we might want to ensure it's in the right mode if feasible, 
+            # but usually restarting selection is cleaner if mode differs significantly.
+            # However, requirement says "Only open existing control panel".
+            # So we just activate it.
+            
+            self.selection_widget.show_panel()
+            self.selection_widget.activateWindow()
+            
+            if self.selection_widget.control_panel:
+                if self.selection_widget.control_panel.isMinimized():
+                    self.selection_widget.control_panel.showNormal()
+                self.selection_widget.control_panel.show()
+                self.selection_widget.control_panel.raise_()
+                self.selection_widget.control_panel.activateWindow()
+            return
+
+        # --- Device Auto-Correction Logic ---
+        # Mic
+        if self.record_audio:
+            mic_idx = self.config_manager.get("mic_index")
+            mic_name = self.config_manager.get("mic_name")
+            new_mic_idx = self.validate_device_index(mic_idx, mic_name, 'mic')
+            if new_mic_idx != mic_idx:
+                print(f"Auto-corrected Mic Index: {mic_idx} -> {new_mic_idx}")
+                self.selected_mic_index = new_mic_idx
+                self.config_manager.set("mic_index", new_mic_idx)
+            
+            # Update name in config if missing or changed
+            curr_name = self.get_device_name(self.selected_mic_index, 'mic')
+            if curr_name and curr_name != mic_name:
+                self.config_manager.set("mic_name", curr_name)
+
+        # Cam
+        if self.cam_enabled:
+            cam_idx = self.config_manager.get("cam_index", 0)
+            cam_name = self.config_manager.get("cam_name")
+            new_cam_idx = self.validate_device_index(cam_idx, cam_name, 'cam')
+            if new_cam_idx != cam_idx:
+                print(f"Auto-corrected Cam Index: {cam_idx} -> {new_cam_idx}")
+                self.selected_cam_index = new_cam_idx
+                self.config_manager.set("cam_index", new_cam_idx)
+                
+            # Update name
+            curr_cam_name = self.get_device_name(self.selected_cam_index, 'cam')
+            if curr_cam_name and curr_cam_name != cam_name:
+                self.config_manager.set("cam_name", curr_cam_name)
+        
         # 1. 创建控制面板
         control_panel = ControlPanel()
         
@@ -412,11 +703,14 @@ class LuScreenApp:
         
         # 还需要设置面板内部选中的 index，以便右键菜单显示正确
         control_panel.current_mic_index = self.selected_mic_index
+        control_panel.current_mic_name = self.config_manager.get("mic_name") # Pass saved name
         control_panel.current_cam_index = self.selected_cam_index
         control_panel.current_mouse_style = self.mouse_style
         
         # 2. 创建选区工具 (将面板传递给它)
         self.selection_widget = SelectionWidget(control_panel, mode=mode)
+        # 安全清理：当对象销毁时自动置空引用，防止 Dangling Pointer
+        self.selection_widget.destroyed.connect(self.on_selection_widget_destroyed)
         
         # 如果是录屏模式，且配置中开启了摄像头，确保它是打开的
         if mode == 'record':
@@ -440,6 +734,8 @@ class LuScreenApp:
             
         self.selection_widget.cancelled.connect(self.selection_cancelled)
         self.selection_widget.settings_changed.connect(self.on_selection_settings_changed)
+        self.selection_widget.camera_ratio_changed.connect(self.update_camera_ratio)
+        self.selection_widget.mode_changed.connect(self.on_selection_mode_changed)
         
         # 3. 初始状态：只显示面板，不显示全屏遮罩
         # self.selection_widget.show() # 移除此行，由模式切换控制显示
@@ -450,6 +746,52 @@ class LuScreenApp:
         # 关键修复：确保摄像头在选区工具之上，以便用户可以拖拽它
         if self.camera_widget and self.camera_widget.isVisible():
             self.camera_widget.raise_()
+
+    def update_camera_ratio(self, ratio):
+        if self.camera_widget:
+            # Force custom shape mode when ratio is explicitly set via UI
+            if self.camera_widget.shape_mode == 'circle':
+                self.camera_widget.shape_mode = 'custom'
+            self.camera_widget.set_aspect_ratio(ratio)
+            print(f"DEBUG: Camera ratio updated to {ratio}")
+
+    def on_selection_mode_changed(self, mode):
+        print(f"DEBUG: Mode changed to {mode}")
+        if mode == 'camera_only':
+            # Ensure camera is open and visible
+            if not self.camera_widget:
+                self.open_camera(self.selected_cam_index)
+            elif not self.camera_widget.isVisible():
+                self.camera_widget.show()
+                self.camera_widget.raise_()
+
+            if self.camera_widget:
+                print("DEBUG: Applying Camera Only settings (9:16, 400px, Center)")
+                # 1. 形状：矩形 9:16
+                self.camera_widget.set_shape('9:16')
+                # 2. 尺寸：大 (400px)
+                self.camera_widget.resize_to_width(400)
+                # 3. 位置：居中
+                self.camera_widget.move_to_center()
+                
+                # Log position
+                geo = self.camera_widget.geometry()
+                print(f"DEBUG: Camera moved to Center: x={geo.x()}, y={geo.y()}, w={geo.width()}, h={geo.height()}")
+        
+        elif mode in ['fullscreen', 'area']:
+            print(f"DEBUG: Applying {mode} settings (Circle, 200px, Bottom-Right)")
+            # 切换回普通录制模式时，如果摄像头已打开
+            if self.camera_widget and self.camera_widget.isVisible():
+                # 1. 形状：圆形
+                self.camera_widget.set_shape('circle')
+                # 2. 尺寸：小 (200px - 默认小尺寸)
+                self.camera_widget.resize_to_width(200)
+                # 3. 位置：右下角
+                self.camera_widget.move_to_bottom_right()
+                
+                # Log position
+                geo = self.camera_widget.geometry()
+                print(f"DEBUG: Camera moved to Bottom-Right: x={geo.x()}, y={geo.y()}, w={geo.width()}, h={geo.height()}")
 
     def start_scroll_capture(self, rect):
         print(f"Starting scroll capture for area: {rect}")
@@ -512,8 +854,8 @@ class LuScreenApp:
         self.tray_icon.showMessage("滚动截图失败", error, QSystemTrayIcon.Warning, 3000)
         self.scroll_worker = None
 
-    def ocr_area(self, rect):
-        print(f"OCR area: {rect}")
+    def ocr_area(self, rect, mode=None):
+        print(f"OCR area: {rect}, mode: {mode}")
         self.selection_widget = None
         
         try:
@@ -556,7 +898,9 @@ class LuScreenApp:
         elif type_ == 'mic_idx':
             self.selected_mic_index = value
             self.config_manager.set("mic_index", value)
-            print(f"Mic changed: {value}")
+            name = self.get_device_name(value, 'mic')
+            if name: self.config_manager.set("mic_name", name)
+            print(f"Mic changed: {value} ({name})")
         elif type_ == 'sys_toggle':
             self.record_sys_audio = value
             self.config_manager.set("sys_audio_enabled", value)
@@ -575,7 +919,9 @@ class LuScreenApp:
         elif type_ == 'cam_idx':
             self.selected_cam_index = value
             self.config_manager.set("cam_index", value)
-            print(f"DEBUG: Camera index changed to {value}, opening camera...")
+            name = self.get_device_name(value, 'cam')
+            if name: self.config_manager.set("cam_name", name)
+            print(f"DEBUG: Camera index changed to {value} ({name}), opening camera...")
             self.open_camera(self.selected_cam_index)
         elif type_ == 'cam_shape':
             self.selected_cam_shape = value
@@ -594,6 +940,58 @@ class LuScreenApp:
             
         # 实时保存配置
         self.config_manager.save()
+
+    def open_video_editor(self):
+        # 1. Select Video File
+        file_path, _ = QFileDialog.getOpenFileName(
+            None, 
+            "打开视频文件", 
+            self.config_manager.get("save_path_record", ""), 
+            "视频文件 (*.mp4 *.avi *.mkv *.mov);;所有文件 (*.*)"
+        )
+        
+        if not file_path:
+            return
+            
+        try:
+            from src.video_editor import VideoEditor
+            
+            # 2. Auto-detect related files (mic/sys audio, metadata)
+            # Assuming standard naming convention: name.mp4 -> name_mic.wav, name_sys.wav, name.json
+            base_path = os.path.splitext(file_path)[0]
+            
+            mic_path = f"{base_path}_mic.wav"
+            if not os.path.exists(mic_path): mic_path = None
+            
+            sys_path = f"{base_path}_sys.wav"
+            if not os.path.exists(sys_path): sys_path = None
+            
+            # 兼容性处理：如果未找到分离音轨，尝试将视频本身作为系统音频源，以便显示音量控制
+            # 注意：这需要 VideoEditor 内部逻辑支持将视频文件作为 audio_sys 输入
+            if not mic_path and not sys_path:
+                # 只有当它是普通视频文件时才这样做
+                sys_path = file_path
+
+            meta_path = f"{base_path}.json"
+            if not os.path.exists(meta_path): meta_path = None
+            
+            # Default output path (add 'edit' suffix)
+            output_path = f"{base_path}_edit.mp4"
+            
+            if not hasattr(self, 'editors'):
+                self.editors = []
+            
+            # 3. Launch Editor reusing the existing class
+            editor = VideoEditor(file_path, mic_path, sys_path, meta_path, output_path)
+            self.editors.append(editor)
+            editor.show()
+            
+            # Cleanup closed editors
+            self.editors = [e for e in self.editors if e.isVisible()]
+            
+        except Exception as e:
+            print(f"Failed to launch editor: {e}")
+            QMessageBox.critical(None, "错误", f"无法启动视频编辑器: {str(e)}")
 
     def open_settings(self):
         # 暂停全局快捷键，防止在设置时触发或死锁
@@ -649,8 +1047,8 @@ class LuScreenApp:
     def capture_fullscreen(self):
         self.capture_area(self.app.primaryScreen().geometry())
 
-    def capture_area(self, rect):
-        print(f"Capturing area: {rect}")
+    def capture_area(self, rect, mode=None):
+        print(f"Capturing area: {rect}, mode: {mode}")
         # 清理选区工具
         self.selection_widget = None
         
@@ -704,16 +1102,31 @@ class LuScreenApp:
             traceback.print_exc()
 
     def selection_cancelled(self):
+        # 注意：这里我们手动置空，但如果 destroyed 信号随后触发，
+        # on_selection_widget_destroyed 也会被调用。
+        # 由于我们设置为 None 了，on_selection_widget_destroyed 中的 check (is obj) 可能会失败（因为 self.selection_widget 已经是 None），
+        # 或者如果 self.selection_widget 被重新赋值了，check 也会保护它。
         self.selection_widget = None
         # 当用户点击X关闭面板时，同时关闭摄像头（如果已打开）
         self.close_camera()
         print("Selection cancelled")
 
-    def start_recording(self, rect):
-        print(f"Recording area selected: {rect}")
+    def on_selection_widget_destroyed(self, obj=None):
+        """
+        Slot to handle safe cleanup when selection widget is destroyed.
+        This handles cases where the widget is closed/destroyed not via the cancel path
+        (e.g. system close, parent destruction, or unexpected errors).
+        """
+        if self.selection_widget is obj:
+            self.selection_widget = None
+            print("Selection widget destroyed safely (Dangling pointer cleanup).")
+
+    def start_recording(self, rect, mode=None):
+        print(f"Recording area selected: {rect}, mode: {mode}")
         
-        # 保存选区 rect 以便后续使用
+        # 保存选区 rect 和 mode 以便后续使用
         self.pending_recording_rect = rect
+        self.pending_recording_mode = mode
         
         # 清理选区工具 (此时选区工具已经隐藏，但可以完全清理)
         self.selection_widget = None
@@ -725,76 +1138,141 @@ class LuScreenApp:
         
     def _real_start_recording(self):
         rect = self.pending_recording_rect
+        mode = getattr(self, 'pending_recording_mode', None)
         print("Countdown finished, starting recording...")
+        
+        # 处理特殊模式
+        if mode == 'camera_only':
+            if not self.camera_widget or not self.camera_widget.isVisible():
+                self.open_camera(self.selected_cam_index)
+                # 等待窗口显示
+                QApplication.processEvents()
+                import time
+                time.sleep(0.5)
+            
+            if self.camera_widget:
+                # 确保不在全屏模式，而是使用自定义比例
+                if getattr(self.camera_widget, 'is_fullscreen_mode', False):
+                    self.camera_widget.set_fullscreen(False)
+                
+                # 如果是圆形，切换到默认矩形 (9:16)
+                if self.camera_widget.shape_mode == 'circle':
+                    self.camera_widget.set_shape('9:16')
+                    # 调整为大尺寸 (例如 400px 宽度)
+                    self.camera_widget.resize_to_width(400)
+                    # 移动到屏幕中央
+                    self.camera_widget.move_to_center()
+                
+                QApplication.processEvents()
+                import time
+                time.sleep(0.2) # 等待渲染更新
+                
+                rect = self.camera_widget.geometry()
+                print(f"Camera Only mode: using camera geometry {rect}")
+            else:
+                QMessageBox.warning(None, "错误", "无法打开摄像头，将使用全屏录制")
+                rect = self.app.primaryScreen().geometry()
         
         # 如果开启了鼠标特效，启动特效窗口
         if self.mouse_enabled:
             self.mouse_effect = MouseEffectWidget(style=self.mouse_style)
             self.mouse_effect.show()
         
-        # 转换 QRect 到 mss 需要的 dict 格式
-        # 修正 DPI 缩放问题：
-        # Qt 获取的是逻辑像素 (例如 1536x864)，而 mss 需要物理像素 (例如 1920x1080)
-        # 我们需要手动计算缩放比例
-        
+        # Calculate recording region
         region = {}
-        try:
-            with mss.mss() as sct:
-                monitor = sct.monitors[1] # 主屏幕
-                qt_screen = self.app.primaryScreen().geometry()
-                
-                scale_x = monitor['width'] / qt_screen.width()
-                scale_y = monitor['height'] / qt_screen.height()
-                
-                # 如果比例接近 1.0，说明没有缩放或已正确处理 DPI
-                # 但为了保险，我们总是应用缩放
-                
-                region = {
-                    'top': int(rect.top() * scale_y),
-                    'left': int(rect.left() * scale_x),
-                    'width': int(rect.width() * scale_x),
-                    'height': int(rect.height() * scale_y)
-                }
-                
-                # 再次校准：如果这是全屏录制，直接使用 mss 的 monitor 数据
-                # 判断是否全屏：比较 rect 和 qt_screen
-                if rect == qt_screen:
-                    print("[DEBUG] Detected Fullscreen recording, using monitor geometry directly.")
+        
+        if mode == 'camera_only' and self.camera_widget:
+            # For camera only, use the optimal recording resolution from the camera
+            rec_w, rec_h = self.camera_widget.get_recording_size()
+            geo = self.camera_widget.geometry()
+            
+            # Note: top/left are used for cursor offset. 
+            # Since we record at native resolution which might differ from window size,
+            # cursor position mapping would be inaccurate without scaling.
+            # But high resolution is the priority here.
+            region = {
+                'top': geo.top(),
+                'left': geo.left(),
+                'width': rec_w,
+                'height': rec_h
+            }
+            print(f"[DEBUG] Camera Only Mode: Recording at {rec_w}x{rec_h} (Window: {geo.width()}x{geo.height()})")
+            
+        else:
+            # Screen recording mode: Calculate MSS region with DPI scaling
+            try:
+                with mss.mss() as sct:
+                    monitor = sct.monitors[1] # 主屏幕
+                    qt_screen = self.app.primaryScreen().geometry()
+                    
+                    scale_x = monitor['width'] / qt_screen.width()
+                    scale_y = monitor['height'] / qt_screen.height()
+                    
                     region = {
-                        'top': monitor['top'],
-                        'left': monitor['left'],
-                        'width': monitor['width'],
-                        'height': monitor['height']
+                        'top': int(rect.top() * scale_y),
+                        'left': int(rect.left() * scale_x),
+                        'width': int(rect.width() * scale_x),
+                        'height': int(rect.height() * scale_y)
                     }
                     
-                print(f"[DEBUG] DPI Scaling - Qt: {qt_screen.width()}x{qt_screen.height()}, MSS: {monitor['width']}x{monitor['height']}")
-                print(f"[DEBUG] Scale Factors - X: {scale_x:.2f}, Y: {scale_y:.2f}")
-                print(f"[DEBUG] Final Region: {region}")
-                
-        except Exception as e:
-            print(f"[ERROR] Failed to calculate DPI scaling: {e}")
-            # Fallback
-            region = {
-                'top': rect.top(), 
-                'left': rect.left(), 
-                'width': rect.width(), 
-                'height': rect.height()
-            }
+                    # Check for fullscreen
+                    if rect == qt_screen:
+                        print("[DEBUG] Detected Fullscreen recording, using monitor geometry directly.")
+                        region = {
+                            'top': monitor['top'],
+                            'left': monitor['left'],
+                            'width': monitor['width'],
+                            'height': monitor['height']
+                        }
+                        
+                    print(f"[DEBUG] DPI Scaling - Qt: {qt_screen.width()}x{qt_screen.height()}, MSS: {monitor['width']}x{monitor['height']}")
+                    print(f"[DEBUG] Scale Factors - X: {scale_x:.2f}, Y: {scale_y:.2f}")
+                    print(f"[DEBUG] Final Region: {region}")
+                    
+            except Exception as e:
+                print(f"[ERROR] Failed to calculate DPI scaling: {e}")
+                # Fallback
+                region = {
+                    'top': rect.top(), 
+                    'left': rect.left(), 
+                    'width': rect.width(), 
+                    'height': rect.height()
+                }
         
         # 启动录制线程
         # 获取配置中的录制路径
         output_dir = self.config_manager.get("save_path_record")
         video_quality = self.config_manager.get("video_quality", "1080p")
         
+        camera_only = (mode == 'camera_only')
+        audio_only = (mode == 'audio_only')
+        
+        # Get audio device name if index is selected
+        audio_device_name = None
+        if self.selected_mic_index is not None:
+            try:
+                devices = AudioRecorder.get_input_devices()
+                for dev in devices:
+                    if dev['index'] == self.selected_mic_index:
+                        audio_device_name = dev['name']
+                        break
+            except Exception as e:
+                print(f"Error getting audio device name: {e}")
+
         self.recorder = ScreenRecorder(
             region=region, 
             output_filename=None, 
             record_audio=self.record_audio,
             audio_device_index=self.selected_mic_index,
+            audio_device_name=audio_device_name,
             record_system_audio=self.record_sys_audio,
             output_dir=output_dir,
             video_quality=video_quality,
-            use_gpu=self.config_manager.get("gpu_acceleration", False)
+            use_gpu=self.config_manager.get("gpu_acceleration", False),
+            camera_only=camera_only,
+            camera_index=self.selected_cam_index,
+            audio_only=audio_only,
+            frame_provider=self.camera_widget if camera_only else None
         )
             
         self.recorder.start()
@@ -831,9 +1309,18 @@ class LuScreenApp:
                     self.recording_frame.set_paused(True)
 
     def stop_recording(self):
+        rec = None
         if self.recorder:
+            rec = self.recorder
             self.recorder.stop()
             self.recorder = None
+            
+        # 停止录制时关闭摄像头
+        self.close_camera()
+            
+        # 如果摄像头处于全屏模式，退出全屏
+        if self.camera_widget and getattr(self.camera_widget, 'is_fullscreen_mode', False):
+            self.camera_widget.set_fullscreen(False)
             
         if self.control_bar:
             self.control_bar.close()
@@ -850,15 +1337,68 @@ class LuScreenApp:
         self.action_record.setEnabled(True)
         print("Recording stopped.")
         
+        # Launch Video Editor
+        if rec and not rec.audio_only:
+            try:
+                from src.video_editor import VideoEditor
+                # 使用 final_output 而不是 temp_video，因为 temp_video 已被重命名
+                video_path = rec.final_output
+                mic_path = rec.temp_audio_mic
+                sys_path = rec.temp_audio_sys
+                # Robust extension replacement
+                base_path = os.path.splitext(video_path)[0]
+                meta_path = f"{base_path}.json"
+                output_path = rec.final_output
+                
+                if not hasattr(self, 'editors'):
+                    self.editors = []
+                
+                editor = VideoEditor(video_path, mic_path, sys_path, meta_path, output_path)
+                self.editors.append(editor)
+                editor.show()
+                
+                # Cleanup closed editors
+                self.editors = [e for e in self.editors if e.isVisible()]
+            except Exception as e:
+                print(f"Failed to launch editor: {e}")
+        
         # 录制结束后，重新显示选区面板，方便下一次操作
         # 使用 QTimer.singleShot 稍微延迟一下，避免与停止录制的 UI 更新冲突
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(500, lambda: self.start_selection(mode='record'))
+        # from PySide6.QtCore import QTimer
+        # QTimer.singleShot(500, lambda: self.start_selection(mode='record'))
 
     def confirm_quit(self):
         if self.recorder is not None:
             QMessageBox.warning(None, "提示", "正在录制中，请先停止录制！")
             return
+            
+        # Explicitly close all widgets to ensure threads are stopped
+        try:
+            if self.camera_widget:
+                self.camera_widget.close()
+                self.camera_widget = None
+                
+            if self.selection_widget:
+                self.selection_widget.close()
+                self.selection_widget = None
+                
+            if self.control_bar:
+                self.control_bar.close()
+                self.control_bar = None
+                
+            if self.mouse_effect:
+                self.mouse_effect.close()
+                self.mouse_effect = None
+                
+            if hasattr(self, 'editors'):
+                for editor in self.editors:
+                    try: editor.close()
+                    except: pass
+                self.editors = []
+                
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+            
         self.app.quit()
 
     def run(self):

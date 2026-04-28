@@ -1,7 +1,0 @@
-2026-01-01 19:31:15,542 - INFO - Starting ScreenRecorder thread
-2026-01-01 19:31:15,720 - INFO - Initializing SystemAudioRecorder...
-2026-01-01 19:31:15,728 - INFO - SystemAudioRecorder started
-2026-01-01 19:31:50,860 - INFO - Starting merge_av
-2026-01-01 19:31:50,860 - INFO - FFmpeg path: C:\Python313\Lib\site-packages\imageio_ffmpeg\binaries\ffmpeg-win-x86_64-v7.1.exe
-2026-01-01 19:31:50,860 - INFO - Has Mic: True (Path: G:\AICoding\luscreen\recordings\temp_audio_mic_20260101_193115.wav)
-2026-01-01 19:31:50,860 - INFO - Has Sys: True (Path: G:\AICoding\luscreen\recordings\temp_audio_sys_20260101_193115.wav)

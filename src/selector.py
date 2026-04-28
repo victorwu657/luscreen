@@ -2,20 +2,35 @@ from PySide6.QtWidgets import QWidget, QRubberBand, QPushButton, QHBoxLayout, QV
 from PySide6.QtCore import Qt, QRect, QPoint, QSize, Signal
 from PySide6.QtGui import QPainter, QColor, QPen, QCursor, QAction
 from src.control_panel import ControlPanel
+import logging
+import os
+
+logger = logging.getLogger("SelectionWidget")
 
 class SelectionWidget(QWidget):
     # 定义信号
-    area_selected = Signal(QRect) # 包含最终选区
+    area_selected = Signal(QRect, str) # 包含最终选区和模式
     scroll_area_selected = Signal(QRect) # 新增信号
+    camera_ratio_changed = Signal(float) # 相机比例变更
+    mode_changed = Signal(str) # 模式变更信号
     cancelled = Signal()
     
     # 转发控制面板的信号
     settings_changed = Signal(dict) # {type: 'mic'/'cam', value: ...}
 
     def __init__(self, control_panel, mode='record'):
+        logger.info(f"Initializing SelectionWidget mode={mode}")
         super().__init__()
         self.mode = mode # 'record', 'capture' or 'ocr'
         self.control_panel = control_panel
+
+        if os.name == "nt":
+            try:
+                import ctypes
+                title = "截图" if mode == "capture" else "LuScreen"
+                ctypes.windll.kernel32.SetConsoleTitleW(str(title))
+            except Exception:
+                pass
         
         # 全屏无边框，置顶
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
@@ -77,9 +92,12 @@ class SelectionWidget(QWidget):
             self.selection_rect = QRect()
         
     def on_mode_changed(self, mode):
+        logger.info(f"Mode changed to: {mode}")
         self.current_mode = mode
+        self.mode_changed.emit(mode)
         if mode == 'fullscreen':
             self.selection_rect = self.rect()
+            logger.info("Showing fullscreen selection")
             self.show() # 显示全屏遮罩
             self.raise_() # 确保在最上层
             self.control_panel.raise_() # 面板必须在遮罩之上
@@ -87,18 +105,40 @@ class SelectionWidget(QWidget):
             # 全屏时更新面板数字
             self.control_panel.update_size_display(self.rect().width(), self.rect().height())
         elif mode == 'area':
-            # 切换到区域模式，清除选区等待用户拖拽
+            # 切换到区域模式，默认无选区，等待用户拖拽
             self.selection_rect = QRect()
+            logger.info("Showing area selection (empty)")
             self.show() # 显示全屏遮罩以捕获鼠标
             self.raise_()
             self.control_panel.raise_()
             self.update()
-        elif mode is None:
+            # 显示面板（在底部），允许用户取消
+            self.show_panel()
+        elif mode == 'camera_only' or mode == 'audio_only':
+            self.selection_rect = QRect()
+            # Hide mask for camera/audio only modes to avoid black screen
+            self.hide() 
+            self.control_panel.show()
+            self.control_panel.raise_()
+            self.show_panel()
+            
+            # Special handling for camera_only: show camera if hidden
+            if mode == 'camera_only':
+                # We can't directly access camera_widget here easily, 
+                # but the mode_changed signal will trigger logic in main.py
+                pass
+        elif mode is None or mode == "":
+            logger.info("Mode changed to None (Reset)")
             self.selection_rect = QRect()
             self.hide() # 隐藏全屏遮罩，恢复桌面交互
-            self.update()
+            self.update() # 触发重绘以清除任何残留的绘制（如全屏边框）
 
     def set_aspect_ratio(self, ratio):
+        if self.current_mode == 'camera_only':
+            if ratio is not None:
+                self.camera_ratio_changed.emit(ratio)
+            return
+
         self.aspect_ratio = ratio
         if not self.selection_rect.isNull() and ratio is not None:
             # 立即调整当前选区符合比例
@@ -118,6 +158,7 @@ class SelectionWidget(QWidget):
             self.show_panel()
             
     def paintEvent(self, event):
+        # logger.debug("paintEvent") # Reduce spam
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         
@@ -153,7 +194,9 @@ class SelectionWidget(QWidget):
             # 显示尺寸文字
             text = f"{self.selection_rect.width()} x {self.selection_rect.height()}"
             painter.setPen(Qt.white)
-            painter.drawText(self.selection_rect.topLeft() - QPoint(0, 5), text)
+            tl = self.selection_rect.topLeft()
+            painter.drawText(QPoint(tl.x(), tl.y() - 5), text)
+
 
     def draw_handles(self, painter):
         if self.selection_rect.isNull(): return
@@ -401,11 +444,29 @@ class SelectionWidget(QWidget):
                 if y < 0:
                      y = screen_bottom - panel_h - 50
 
-        # 最后的屏幕边界检查
-        if x < 0: x = 0
-        if x + panel_w > self.width(): x = self.width() - panel_w
-        if y < 0: y = 0
-        if y + panel_h > self.height(): y = self.height() - panel_h
+        # 最后的屏幕边界检查 (Clamping to SelectionWidget bounds)
+        # 注意：SelectionWidget 通常只覆盖主屏幕，但在多屏下可能需要覆盖所有屏幕
+        # 这里保留基本的 Clamping 防止超出 SelectionWidget
+        # if x < 0: x = 0
+        # if x + panel_w > self.width(): x = self.width() - panel_w
+        # if y < 0: y = 0
+        # if y + panel_h > self.height(): y = self.height() - panel_h
+        
+        # --- 鲁棒性增强：屏幕可见性检查 ---
+        # 防止面板因断开显示器等原因出现在不可见区域
+        is_visible = False
+        panel_rect = QRect(x, y, panel_w, panel_h)
+        
+        for screen in QApplication.screens():
+            if screen.geometry().intersects(panel_rect):
+                is_visible = True
+                break
+        
+        if not is_visible:
+            logger.warning(f"ControlPanel position {x},{y} is off-screen. Resetting to primary screen center.")
+            primary = QApplication.primaryScreen().geometry()
+            x = primary.left() + primary.width() // 2 - panel_w // 2
+            y = primary.top() + primary.height() // 2 - panel_h // 2
             
         self.control_panel.move(x, y)
         self.control_panel.show()
@@ -429,16 +490,18 @@ class SelectionWidget(QWidget):
             self.update_selection_from_panel(w, h)
 
     def confirm_selection(self):
-        if self.selection_rect.isNull() or self.selection_rect.width() <= 0 or self.selection_rect.height() <= 0:
-            QMessageBox.warning(self, "提示", "请先用鼠标框选区域")
-            return
+        # 如果是纯摄像头模式或纯音频模式，不需要选区
+        if self.current_mode != 'camera_only' and self.current_mode != 'audio_only':
+            if self.selection_rect.isNull() or self.selection_rect.width() <= 0 or self.selection_rect.height() <= 0:
+                QMessageBox.warning(self, "提示", "请先用鼠标框选区域")
+                return
 
         self.hide() # 先隐藏自己
         self.control_panel.hide() # 隐藏面板
         QApplication.processEvents() # 让系统处理隐藏事件
         self.close()
         self.control_panel.close()
-        self.area_selected.emit(self.selection_rect)
+        self.area_selected.emit(self.selection_rect, self.current_mode)
 
     def confirm_scroll_selection(self):
         if self.selection_rect.isNull() or self.selection_rect.width() <= 0 or self.selection_rect.height() <= 0:

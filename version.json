@@ -1,5 +1,5 @@
 {
-    "version": "0.043",
-    "url": "https://github.com/victorwu657/luscreen/releases/download/v0.043/LuScreen.zip",
-    "description": "修复了系统的log。"
+    "version": "0.046.9",
+    "url": "https://luscreen.com/downloads/luscreen.zip",
+    "notes": "更新日志：修复了Rust核心可用性检测与加载回退问题"
 }

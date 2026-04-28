@@ -5,7 +5,6 @@ numpy
 pyaudio
 imageio
 imageio-ffmpeg
-qdarktheme
 keyboard
 soundcard
 pynput
@@ -13,3 +12,13 @@ soundfile
 requests
 rapidocr_onnxruntime
 pyperclip
+maturin
+sherpa-onnx>=1.9.30
+openai>=1.0.0
+whisperx
+faster-whisper
+ctranslate2
+transformers
+torch
+torchaudio
+ffmpeg-python

@@ -1,0 +1,48 @@
+[package]
+name = "rust_core"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "rust_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+# PyO3 for Python bindings
+pyo3 = { version = "0.22.0", features = ["extension-module"] }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Screen capture
+# scap = { git = "https://github.com/CapSoftware/scap.git", branch = "main" }
+windows-capture = "1.5.0"
+windows = { version = "0.58", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse"] }
+
+# Data serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Audio capture
+cpal = "0.15.2"
+
+# FFmpeg bindings
+# ffmpeg-next = { version = "6.0.0", features = ["build"] }
+
+# Logging
+log = "0.4"
+env_logger = "0.10"
+
+# High performance image processing
+rayon = "1.10"
+fast_image_resize = "5.1"
+image = "0.25"
+num_cpus = "1.13"
+
+# GPU Rendering (VIP)
+wgpu = "22.1"
+bytemuck = { version = "1.16", features = ["derive"] }
+pollster = "0.3"
+

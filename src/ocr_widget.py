@@ -7,6 +7,23 @@ from PySide6.QtGui import QPixmap, QImage, QIcon
 import pyperclip
 import cv2
 import numpy as np
+import traceback
+
+import logging
+
+logger = logging.getLogger("OCRWidget")
+
+try:
+    from rapidocr_onnxruntime import RapidOCR
+    RapidOCR_Error = None
+except ImportError as e:
+    RapidOCR = None
+    import traceback
+    RapidOCR_Error = f"{e}\n{traceback.format_exc()}"
+except Exception as e:
+    RapidOCR = None
+    import traceback
+    RapidOCR_Error = f"{e}\n{traceback.format_exc()}"
 
 class OCRWorker(QThread):
     finished = Signal(str)
@@ -17,20 +34,83 @@ class OCRWorker(QThread):
         self.image_np = image_np
 
     def run(self):
+        logger.info("OCRWorker started")
         try:
-            from rapidocr_onnxruntime import RapidOCR
-            engine = RapidOCR()
+            if RapidOCR is None:
+                logger.error(f"RapidOCR import failed previously: {RapidOCR_Error}")
+                raise ImportError(f"rapidocr_onnxruntime import failed.\nDetails: {RapidOCR_Error}")
+            
+            import sys
+            import os
+            
+            kwargs = {}
+            # Handle PyInstaller frozen environment
+            if getattr(sys, 'frozen', False):
+                logger.info(f"Running in frozen environment. sys.executable: {sys.executable}")
+                # Try to locate config.yaml in standard PyInstaller locations
+                base_paths = []
+                if hasattr(sys, '_MEIPASS'):
+                    base_paths.append(sys._MEIPASS)
+                    logger.info(f"Added _MEIPASS: {sys._MEIPASS}")
+                
+                # For onedir mode
+                exe_dir = os.path.dirname(sys.executable)
+                base_paths.append(exe_dir)
+                base_paths.append(os.path.join(exe_dir, '_internal'))
+                
+                for base in base_paths:
+                    config_path = os.path.join(base, 'rapidocr_onnxruntime', 'config.yaml')
+                    logger.debug(f"Checking config path: {config_path}")
+                    if os.path.exists(config_path):
+                        kwargs['config_path'] = config_path
+                        logger.info(f"Found config.yaml at: {config_path}")
+                        break
+            
+            logger.info("Initializing RapidOCR engine...")
+            engine = RapidOCR(**kwargs)
+            logger.info("RapidOCR engine initialized successfully")
+            
+            # 1. 尝试原始图片
+            logger.info("Starting inference on original image")
             result, elapse = engine(self.image_np)
             
+            # 2. 如果未识别到，尝试添加白边 (解决文字贴边问题)
+            if not result:
+                logger.info("No result, trying padding...")
+                h, w, c = self.image_np.shape
+                pad = 50
+                img_padded = np.full((h + 2*pad, w + 2*pad, c), 255, dtype=np.uint8)
+                img_padded[pad:pad+h, pad:pad+w] = self.image_np
+                result, elapse = engine(img_padded)
+            
+            # 3. 如果还是未识别到，尝试放大图片 (解决小字问题)
+            if not result:
+                logger.info("No result, trying scaling...")
+                img_scaled = cv2.resize(self.image_np, (0, 0), fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+                result, elapse = engine(img_scaled)
+                
+            # 4. 尝试灰度化 + 二值化
+            if not result:
+                logger.info("No result, trying binarization...")
+                gray = cv2.cvtColor(self.image_np, cv2.COLOR_BGR2GRAY)
+                _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                # 转回3通道以适配接口
+                binary_color = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+                result, elapse = engine(binary_color)
+            
             if result:
+                logger.info(f"OCR success. Found {len(result)} lines.")
                 # result is a list of [box, text, score]
                 text = "\n".join([line[1] for line in result])
                 self.finished.emit(text)
             else:
+                logger.warning("OCR failed to find any text.")
                 self.finished.emit("未识别到文字")
-        except ImportError:
-            self.error.emit("错误：未安装 rapidocr_onnxruntime 库。\n请运行: pip install rapidocr_onnxruntime")
+        except ImportError as e:
+            logger.error(f"ImportError in OCRWorker: {e}", exc_info=True)
+            self.error.emit(f"OCR 库加载失败: {str(e)}")
         except Exception as e:
+            logger.error(f"Exception in OCRWorker: {e}", exc_info=True)
             self.error.emit(f"OCR 识别出错: {str(e)}")
 
 class OCRWidget(QWidget):

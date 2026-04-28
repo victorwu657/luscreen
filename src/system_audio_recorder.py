@@ -5,6 +5,9 @@ import time
 import logging
 import os
 import sys
+import warnings
+import socket
+import numpy as np
 
 def setup_logger():
     """Setup a logger that writes to a file in the executable's directory."""
@@ -19,7 +22,11 @@ def setup_logger():
         else:
             base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             
-        log_file = os.path.join(base_path, 'system_audio_debug.log')
+        logs_dir = os.path.join(base_path, 'logs')
+        if not os.path.exists(logs_dir):
+            os.makedirs(logs_dir)
+            
+        log_file = os.path.join(logs_dir, 'system_audio_debug.log')
         
         fh = logging.FileHandler(log_file, mode='w', encoding='utf-8')
         fh.setLevel(logging.DEBUG)
@@ -29,15 +36,70 @@ def setup_logger():
         
     return logger
 
+def _patch_soundcard_numpy_compat():
+    try:
+        import numpy as _np
+        major = int(str(getattr(_np, "__version__", "0")).split(".", 1)[0] or 0)
+        if major < 2:
+            return False
+    except Exception:
+        return False
+
+    try:
+        import soundcard.mediafoundation as mf
+    except Exception:
+        return False
+
+    try:
+        if not hasattr(mf, "numpy"):
+            return False
+        if not hasattr(mf.numpy, "frombuffer"):
+            return False
+        if not hasattr(mf.numpy, "fromstring"):
+            return False
+
+        def _safe_fromstring(buf, dtype=None, count=-1, sep=""):
+            return mf.numpy.frombuffer(buf, dtype=dtype, count=count).copy()
+
+        mf.numpy.fromstring = _safe_fromstring
+        return True
+    except Exception:
+        return False
+
+def _patch_soundcard_com_shutdown():
+    try:
+        import soundcard.mediafoundation as mf
+        cls = getattr(mf, "_COMLibrary", None)
+        if cls is None:
+            return False
+        orig = getattr(cls, "__del__", None)
+        if orig is None:
+            return False
+        if getattr(orig, "__luscreen_patched__", False):
+            return True
+
+        def _safe_del(self):
+            try:
+                return orig(self)
+            except Exception:
+                return None
+
+        setattr(_safe_del, "__luscreen_patched__", True)
+        cls.__del__ = _safe_del
+        return True
+    except Exception:
+        return False
+
 class SystemAudioRecorder(threading.Thread):
-    def __init__(self, filename):
+    def __init__(self, filename, stream_port=None):
         super().__init__()
         self.filename = filename
+        self.stream_port = stream_port
         self.is_recording = False
         self.is_paused = False
         self.stop_event = threading.Event()
         self.data_chunks = []
-        self.samplerate = 44100 # soundcard defaults to 44100 or 48000
+        self.samplerate = 48000 # Standard for video
         self.logger = setup_logger()
 
     def run(self):
@@ -47,7 +109,14 @@ class SystemAudioRecorder(threading.Thread):
         # Lazy import to avoid COM conflicts on main thread
         try:
             import soundcard as sc
+            from soundcard import SoundcardRuntimeWarning
+            # Filter the specific warning about data discontinuity
+            warnings.filterwarnings("ignore", category=SoundcardRuntimeWarning, message="data discontinuity in recording")
             self.logger.info("Successfully imported soundcard")
+            if _patch_soundcard_numpy_compat():
+                self.logger.info("Applied NumPy>=2 compatibility patch for soundcard (fromstring -> frombuffer().copy())")
+            if _patch_soundcard_com_shutdown():
+                self.logger.info("Applied soundcard COM shutdown patch (suppress __del__ exceptions)")
         except Exception as e:
             self.logger.error(f"Failed to import soundcard: {e}")
             return
@@ -94,24 +163,68 @@ class SystemAudioRecorder(threading.Thread):
 
             self.logger.info(f"Recording from: {mic_recorder.name}")
             
-            with mic_recorder.recorder(samplerate=self.samplerate) as mic:
-                while not self.stop_event.is_set():
-                    if self.is_paused:
-                        time.sleep(0.1)
-                        try:
-                            mic.record(numframes=4096)
-                        except:
-                            pass
-                        continue
-                        
-                    # Read 4096 frames (~93ms)
+            # Connect to stream port if provided (with retry)
+            stream_sock = None
+            if self.stream_port:
+                for _ in range(10):
                     try:
-                        data = mic.record(numframes=4096)
-                        self.data_chunks.append(data)
-                    except Exception as e:
-                        self.logger.error(f"Error during recording loop: {e}")
+                        stream_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        stream_sock.connect(('127.0.0.1', self.stream_port))
+                        self.logger.info(f"Connected to system audio stream port {self.stream_port}")
                         break
-                    
+                    except Exception:
+                        stream_sock = None
+                        time.sleep(0.5)
+                        
+                if not stream_sock:
+                    self.logger.error(f"Failed to connect to system audio stream port {self.stream_port} after retries")
+
+            with mic_recorder.recorder(samplerate=self.samplerate) as mic:
+                file = None
+                channels = None
+                try:
+                    while not self.stop_event.is_set():
+                        if self.is_paused:
+                            time.sleep(0.1)
+                            try:
+                                mic.record(numframes=4096)
+                            except Exception:
+                                pass
+                            continue
+
+                        try:
+                            data = mic.record(numframes=4096)
+                            if data is None:
+                                continue
+                            if channels is None:
+                                try:
+                                    channels = int(getattr(data, "shape", [0, 0])[1]) if getattr(data, "ndim", 0) == 2 else 1
+                                except Exception:
+                                    channels = 2
+                                channels = 1 if channels <= 1 else 2
+                                file = sf.SoundFile(self.filename, mode='w', samplerate=self.samplerate, channels=channels)
+                            file.write(data)
+
+                            if stream_sock:
+                                try:
+                                    int_data = (np.clip(data, -1.0, 1.0) * 32767).astype(np.int16)
+                                    stream_sock.sendall(int_data.tobytes())
+                                except Exception:
+                                    stream_sock.close()
+                                    stream_sock = None
+                        except Exception as e:
+                            self.logger.error(f"Error during recording loop: {e}")
+                            break
+                finally:
+                    try:
+                        if file is not None:
+                            file.close()
+                    except Exception:
+                        pass
+            
+            if stream_sock:
+                stream_sock.close()
+                        
         except Exception as e:
             self.logger.error(f"System audio recording fatal error: {e}")
         finally:
@@ -132,28 +245,5 @@ class SystemAudioRecorder(threading.Thread):
         self.is_paused = False
 
     def save_to_file(self):
-        if not self.data_chunks:
-            self.logger.warning("No data chunks to save")
-            return
-        
-        try:
-            import numpy as np
-            # Merge all chunks
-            all_data = np.concatenate(self.data_chunks, axis=0)
-            
-            # Simple gain normalization
-            max_val = np.max(np.abs(all_data))
-            if max_val > 0:
-                target_peak = 0.95
-                gain = target_peak / max_val
-                gain = min(gain, 3.0) # Max 3x gain
-                
-                if gain > 1.0:
-                    self.logger.info(f"Applying gain: {gain:.2f}x")
-                    all_data = all_data * gain
-            
-            # Save as wav
-            sf.write(self.filename, all_data, self.samplerate)
-            self.logger.info(f"System audio saved to {self.filename}")
-        except Exception as e:
-            self.logger.error(f"Failed to save file: {e}")
+        # Deprecated: Streaming to disk implemented
+        pass

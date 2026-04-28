@@ -24,12 +24,19 @@ hiddenimports = [
 # 资源文件
 datas = [
     ('assets', 'assets'),
+    ('models/manifest.json', 'models'),
 ]
+
+# 收集 rapidocr_onnxruntime
+tmp_ret = collect_all('rapidocr_onnxruntime')
+datas += tmp_ret[0]
+binaries += tmp_ret[1]
+hiddenimports += tmp_ret[2]
 
 # 二进制文件
 binaries = [
     (ffmpeg_path, '.'), # 放在根目录
-]
+] + binaries
 
 a = Analysis(
     ['main.py'],
