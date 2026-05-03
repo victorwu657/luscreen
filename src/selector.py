@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import QWidget, QRubberBand, QPushButton, QHBoxLayout, QVBoxLayout, QFrame, QApplication, QMenu, QMessageBox
-from PySide6.QtCore import Qt, QRect, QPoint, QSize, Signal
+from PySide6.QtCore import Qt, QRect, QPoint, QSize, Signal, QTimer
 from PySide6.QtGui import QPainter, QColor, QPen, QCursor, QAction
 from src.control_panel import ControlPanel
 import logging
@@ -41,6 +41,11 @@ class SelectionWidget(QWidget):
         # 获取屏幕几何信息
         screen = QApplication.primaryScreen()
         self.setGeometry(screen.geometry())
+        logger.info(
+            "SelectionWidget primary screen geometry=%s screens=%s",
+            screen.geometry(),
+            [s.geometry() for s in QApplication.screens()],
+        )
         
         # 状态
         self.start_point = None
@@ -90,20 +95,51 @@ class SelectionWidget(QWidget):
             self.current_mode = None
             self.control_panel.set_mode(None)
             self.selection_rect = QRect()
+
+    def _log_window_state(self, prefix):
+        try:
+            logger.info(
+                "%s | widget visible=%s hidden=%s active=%s geom=%s frame=%s selection=%s mode=%s | panel visible=%s hidden=%s active=%s geom=%s frame=%s",
+                prefix,
+                self.isVisible(),
+                self.isHidden(),
+                self.isActiveWindow(),
+                self.geometry(),
+                self.frameGeometry(),
+                self.selection_rect,
+                self.current_mode,
+                self.control_panel.isVisible(),
+                self.control_panel.isHidden(),
+                self.control_panel.isActiveWindow(),
+                self.control_panel.geometry(),
+                self.control_panel.frameGeometry(),
+            )
+        except Exception as e:
+            logger.error("SelectionWidget state log failed at %s: %s", prefix, e)
+
+    def _schedule_state_snapshot(self, prefix):
+        QTimer.singleShot(0, lambda: self._log_window_state(f"{prefix} [after-event-loop]"))
         
     def on_mode_changed(self, mode):
         logger.info(f"Mode changed to: {mode}")
         self.current_mode = mode
         self.mode_changed.emit(mode)
+        self._log_window_state(f"on_mode_changed start mode={mode}")
         if mode == 'fullscreen':
             self.selection_rect = self.rect()
             logger.info("Showing fullscreen selection")
             self.show() # 显示全屏遮罩
             self.raise_() # 确保在最上层
+            self.control_panel.show()
             self.control_panel.raise_() # 面板必须在遮罩之上
             self.update()
             # 全屏时更新面板数字
             self.control_panel.update_size_display(self.rect().width(), self.rect().height())
+            self.show_panel()
+            self.control_panel.activateWindow()
+            QApplication.processEvents()
+            self._log_window_state("on_mode_changed fullscreen end")
+            self._schedule_state_snapshot("on_mode_changed fullscreen end")
         elif mode == 'area':
             # 切换到区域模式，默认无选区，等待用户拖拽
             self.selection_rect = QRect()
@@ -114,6 +150,8 @@ class SelectionWidget(QWidget):
             self.update()
             # 显示面板（在底部），允许用户取消
             self.show_panel()
+            self._log_window_state("on_mode_changed area end")
+            self._schedule_state_snapshot("on_mode_changed area end")
         elif mode == 'camera_only' or mode == 'audio_only':
             self.selection_rect = QRect()
             # Hide mask for camera/audio only modes to avoid black screen
@@ -127,11 +165,15 @@ class SelectionWidget(QWidget):
                 # We can't directly access camera_widget here easily, 
                 # but the mode_changed signal will trigger logic in main.py
                 pass
+            self._log_window_state(f"on_mode_changed {mode} end")
+            self._schedule_state_snapshot(f"on_mode_changed {mode} end")
         elif mode is None or mode == "":
             logger.info("Mode changed to None (Reset)")
             self.selection_rect = QRect()
             self.hide() # 隐藏全屏遮罩，恢复桌面交互
             self.update() # 触发重绘以清除任何残留的绘制（如全屏边框）
+            self._log_window_state("on_mode_changed reset end")
+            self._schedule_state_snapshot("on_mode_changed reset end")
 
     def set_aspect_ratio(self, ratio):
         if self.current_mode == 'camera_only':
@@ -252,6 +294,13 @@ class SelectionWidget(QWidget):
         else: self.setCursor(Qt.CrossCursor)
 
     def mousePressEvent(self, event):
+        logger.info(
+            "SelectionWidget mousePress mode=%s button=%s pos=%s selection=%s",
+            self.current_mode,
+            event.button(),
+            event.pos(),
+            self.selection_rect,
+        )
         if self.current_mode == 'area' and event.button() == Qt.LeftButton:
             edge = self.get_resize_edge(event.pos())
             
@@ -395,6 +444,15 @@ class SelectionWidget(QWidget):
             self.setCursor(Qt.CrossCursor)
 
     def mouseReleaseEvent(self, event):
+        logger.info(
+            "SelectionWidget mouseRelease mode=%s button=%s pos=%s selection=%s selecting=%s resizing=%s",
+            self.current_mode,
+            event.button(),
+            event.pos(),
+            self.selection_rect,
+            self.is_selecting,
+            self.is_resizing,
+        )
         if event.button() == Qt.LeftButton:
             self.is_selecting = False
             self.is_resizing = False
@@ -468,9 +526,22 @@ class SelectionWidget(QWidget):
             x = primary.left() + primary.width() // 2 - panel_w // 2
             y = primary.top() + primary.height() // 2 - panel_h // 2
             
+        logger.info(
+            "show_panel computed x=%s y=%s panel=%sx%s selection=%s mode=%s widgetVisible=%s panelVisibleBefore=%s",
+            x,
+            y,
+            panel_w,
+            panel_h,
+            self.selection_rect,
+            self.current_mode,
+            self.isVisible(),
+            self.control_panel.isVisible(),
+        )
         self.control_panel.move(x, y)
         self.control_panel.show()
         self.control_panel.raise_() # 确保在最顶层
+        self._log_window_state("show_panel end")
+        self._schedule_state_snapshot("show_panel end")
 
     def update_selection_from_panel(self, w, h):
         if self.current_mode == 'area':
@@ -490,17 +561,26 @@ class SelectionWidget(QWidget):
             self.update_selection_from_panel(w, h)
 
     def confirm_selection(self):
+        logger.info(
+            "confirm_selection called mode=%s selection=%s widgetVisible=%s panelVisible=%s",
+            self.current_mode,
+            self.selection_rect,
+            self.isVisible(),
+            self.control_panel.isVisible(),
+        )
         # 如果是纯摄像头模式或纯音频模式，不需要选区
         if self.current_mode != 'camera_only' and self.current_mode != 'audio_only':
             if self.selection_rect.isNull() or self.selection_rect.width() <= 0 or self.selection_rect.height() <= 0:
                 QMessageBox.warning(self, "提示", "请先用鼠标框选区域")
                 return
 
+        self._log_window_state("confirm_selection before hide")
         self.hide() # 先隐藏自己
         self.control_panel.hide() # 隐藏面板
         QApplication.processEvents() # 让系统处理隐藏事件
         self.close()
         self.control_panel.close()
+        self._log_window_state("confirm_selection after close before emit")
         self.area_selected.emit(self.selection_rect, self.current_mode)
 
     def confirm_scroll_selection(self):
@@ -516,6 +596,7 @@ class SelectionWidget(QWidget):
         self.scroll_area_selected.emit(self.selection_rect)
 
     def cancel_selection(self):
+        self._log_window_state("cancel_selection before close")
         self.close()
         self.control_panel.close()
         self.cancelled.emit()
@@ -527,3 +608,23 @@ class SelectionWidget(QWidget):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             self.cancel_selection()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._log_window_state("SelectionWidget showEvent")
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self._log_window_state("SelectionWidget hideEvent")
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._log_window_state("SelectionWidget moveEvent")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._log_window_state("SelectionWidget resizeEvent")
+
+    def closeEvent(self, event):
+        self._log_window_state("SelectionWidget closeEvent")
+        super().closeEvent(event)

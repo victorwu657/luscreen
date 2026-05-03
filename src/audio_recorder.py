@@ -46,6 +46,8 @@ class AudioRecorder(threading.Thread):
         self.rate = 48000 # Standard for video
         
         self.p = pyaudio.PyAudio()
+        self.stream = None
+        self.stream_sock = None
 
     @staticmethod
     def get_input_devices():
@@ -114,7 +116,6 @@ class AudioRecorder(threading.Thread):
         self.is_recording = True
         logger.info(f"Starting audio recording to {self.filename}")
         
-        stream = None
         wf = None
         
         try:
@@ -173,68 +174,78 @@ class AudioRecorder(threading.Thread):
             wf.setframerate(self.rate)
             
             # Open Stream
-            stream = self.p.open(format=self.format,
-                            channels=self.channels,
-                            rate=self.rate,
-                            input=True,
-                            input_device_index=self.device_index,
-                            frames_per_buffer=self.chunk)
+            self.stream = self.p.open(format=self.format,
+                                channels=self.channels,
+                                rate=self.rate,
+                                input=True,
+                                input_device_index=self.device_index,
+                                frames_per_buffer=self.chunk)
             
             # Connect to stream port if provided (with retry)
-            stream_sock = None
             if self.stream_port:
                 for _ in range(10): # Try for 5 seconds
                     try:
-                        stream_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        stream_sock.connect(('127.0.0.1', self.stream_port))
+                        self.stream_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        self.stream_sock.connect(('127.0.0.1', self.stream_port))
                         logger.info(f"Connected to audio stream port {self.stream_port}")
                         break
                     except Exception:
-                        stream_sock = None
+                        self.stream_sock = None
                         time.sleep(0.5)
                 
-                if not stream_sock:
+                if not self.stream_sock:
                     logger.error(f"Failed to connect to audio stream port {self.stream_port} after retries")
 
-            if stream:
+            if self.stream:
                 logger.info("Audio stream opened successfully")
                 total_frames = 0
                 while not self.stop_event.is_set():
                     if self.is_paused:
                         try:
                             # Read and discard to prevent buffer overflow
-                            stream.read(self.chunk, exception_on_overflow=False)
+                            self.stream.read(self.chunk, exception_on_overflow=False)
                         except:
                             pass
                         time.sleep(0.1)
                         continue
                         
                     try:
-                        data = stream.read(self.chunk)
+                        data = self.stream.read(self.chunk, exception_on_overflow=False)
                         wf.writeframes(data)
                         total_frames += 1
-                        if stream_sock:
+                        if self.stream_sock:
                             try:
-                                stream_sock.sendall(data)
+                                self.stream_sock.sendall(data)
                             except:
-                                stream_sock.close()
-                                stream_sock = None
+                                self.stream_sock.close()
+                                self.stream_sock = None
                     except Exception as e:
                         logger.error(f"Error reading/writing audio stream: {e}")
                         # Don't break, try to continue
                         pass
                 
                 logger.info(f"Audio recording loop ended. Total frames written: {total_frames} (Approx {total_frames * self.chunk / self.rate:.2f} seconds)")
-
-                if stream_sock:
-                    stream_sock.close()
-                stream.stop_stream()
-                stream.close()
-                logger.info("Audio stream closed")
                 
         except Exception as e:
             logger.error(f"Audio recording fatal error: {e}", exc_info=True)
         finally:
+            if self.stream_sock:
+                try:
+                    self.stream_sock.close()
+                except:
+                    pass
+                self.stream_sock = None
+            if self.stream:
+                try:
+                    self.stream.stop_stream()
+                except:
+                    pass
+                try:
+                    self.stream.close()
+                except:
+                    pass
+                self.stream = None
+                logger.info("Audio stream closed")
             if wf:
                 try:
                     wf.close()
@@ -261,8 +272,27 @@ class AudioRecorder(threading.Thread):
         return self.p.open(**kwargs)
 
     def stop(self):
+        logger.info("AudioRecorder stop requested alive=%s paused=%s", self.is_alive(), self.is_paused)
         self.stop_event.set()
-        self.join()
+        self.join(timeout=0.8)
+        if self.is_alive():
+            logger.warning("AudioRecorder still alive after soft stop, forcing stream shutdown")
+            if self.stream:
+                try:
+                    self.stream.stop_stream()
+                except:
+                    pass
+                try:
+                    self.stream.close()
+                except:
+                    pass
+            if self.stream_sock:
+                try:
+                    self.stream_sock.close()
+                except:
+                    pass
+            self.join(timeout=2.5)
+        logger.info("AudioRecorder stop completed alive=%s", self.is_alive())
 
     def pause(self):
         self.is_paused = True

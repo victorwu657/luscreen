@@ -1,6 +1,7 @@
 import sys
 import os
 import subprocess
+import threading
 from datetime import datetime
 
 if "--subtitle-service" in sys.argv:
@@ -37,8 +38,9 @@ from src.logger import (
 )
 # 立即安装钩子
 install_global_exception_hooks()
-# 初始化日志记录器 (启用 stdout/stderr 重定向)
-logger = setup_global_logger(redirect_stdout=True)
+# 初始化日志记录器
+# 不在应用内再次重定向 stdout/stderr，避免录制热路径的 print 压垮日志锁或磁盘 IO。
+logger = setup_global_logger(redirect_stdout=False)
 fault_path = install_faulthandler()
 logger.info(
     "Startup context | pid=%s frozen=%s exe=%s cwd=%s",
@@ -233,6 +235,8 @@ class LuScreenApp:
         self.recording_frame = None
         self.mouse_effect = None
         self.editors = [] # Keep track of open image editors
+        self._stop_poll_timer = None
+        self._stopping_recorder = None
         
         # 主程序窗口
         self.main_window = MainWindow()
@@ -765,6 +769,18 @@ class LuScreenApp:
 
     def on_selection_mode_changed(self, mode):
         print(f"DEBUG: Mode changed to {mode}")
+        try:
+            logger.info(
+                "on_selection_mode_changed start mode=%s selection_widget_visible=%s panel_visible=%s panel_geom=%s camera_visible=%s camera_geom=%s",
+                mode,
+                self.selection_widget.isVisible() if self.selection_widget else None,
+                self.selection_widget.control_panel.isVisible() if self.selection_widget and self.selection_widget.control_panel else None,
+                self.selection_widget.control_panel.geometry() if self.selection_widget and self.selection_widget.control_panel else None,
+                self.camera_widget.isVisible() if self.camera_widget else None,
+                self.camera_widget.geometry() if self.camera_widget else None,
+            )
+        except Exception:
+            pass
         if mode == 'camera_only':
             # Ensure camera is open and visible
             if not self.camera_widget:
@@ -800,6 +816,26 @@ class LuScreenApp:
                 # Log position
                 geo = self.camera_widget.geometry()
                 print(f"DEBUG: Camera moved to Bottom-Right: x={geo.x()}, y={geo.y()}, w={geo.width()}, h={geo.height()}")
+            try:
+                if self.selection_widget and self.selection_widget.control_panel:
+                    self.selection_widget.control_panel.show()
+                    self.selection_widget.control_panel.raise_()
+                    self.selection_widget.control_panel.activateWindow()
+            except Exception as e:
+                print(f"DEBUG: Failed to raise control panel in {mode} mode: {e}")
+        try:
+            logger.info(
+                "on_selection_mode_changed end mode=%s selection_widget_visible=%s panel_visible=%s panel_active=%s panel_geom=%s camera_visible=%s camera_geom=%s",
+                mode,
+                self.selection_widget.isVisible() if self.selection_widget else None,
+                self.selection_widget.control_panel.isVisible() if self.selection_widget and self.selection_widget.control_panel else None,
+                self.selection_widget.control_panel.isActiveWindow() if self.selection_widget and self.selection_widget.control_panel else None,
+                self.selection_widget.control_panel.geometry() if self.selection_widget and self.selection_widget.control_panel else None,
+                self.camera_widget.isVisible() if self.camera_widget else None,
+                self.camera_widget.geometry() if self.camera_widget else None,
+            )
+        except Exception:
+            pass
 
     def start_scroll_capture(self, rect):
         print(f"Starting scroll capture for area: {rect}")
@@ -1317,58 +1353,105 @@ class LuScreenApp:
                     self.recording_frame.set_paused(True)
 
     def stop_recording(self):
-        rec = None
-        if self.recorder:
-            rec = self.recorder
-            self.recorder.stop()
-            self.recorder = None
-            
-        # 停止录制时关闭摄像头
-        self.close_camera()
-            
-        # 如果摄像头处于全屏模式，退出全屏
-        if self.camera_widget and getattr(self.camera_widget, 'is_fullscreen_mode', False):
-            self.camera_widget.set_fullscreen(False)
-            
+        if not self.recorder:
+            logger.info("stop_recording called with no active recorder")
+            return
+
+        if self._stopping_recorder is not None:
+            logger.info("stop_recording ignored because shutdown is already in progress")
+            return
+
+        rec = self.recorder
+        self.recorder = None
+        self._stopping_recorder = rec
+        logger.info(
+            "stop_recording requested recorder_alive=%s paused=%s audio_only=%s final_output=%s",
+            rec.is_alive(),
+            getattr(rec, "is_paused", None),
+            getattr(rec, "audio_only", None),
+            getattr(rec, "final_output", None),
+        )
+
         if self.control_bar:
+            self.control_bar.setEnabled(False)
             self.control_bar.close()
             self.control_bar = None
-            
+
         if self.recording_frame:
             self.recording_frame.close()
             self.recording_frame = None
-            
+
         if self.mouse_effect:
             self.mouse_effect.close()
             self.mouse_effect = None
-            
+
+        # 停止录制时关闭摄像头
+        self.close_camera()
+
+        # 如果摄像头处于全屏模式，退出全屏
+        if self.camera_widget and getattr(self.camera_widget, 'is_fullscreen_mode', False):
+            self.camera_widget.set_fullscreen(False)
+
+        def _stop_worker():
+            try:
+                logger.info("Background recorder stop worker started")
+                rec.stop()
+                logger.info("Background recorder stop worker finished alive=%s", rec.is_alive())
+            except Exception:
+                logger.exception("Background recorder stop worker failed")
+
+        threading.Thread(target=_stop_worker, daemon=True).start()
+        self._start_stop_poll()
+
+    def _start_stop_poll(self):
+        if self._stop_poll_timer is None:
+            self._stop_poll_timer = QTimer()
+            self._stop_poll_timer.setInterval(200)
+            self._stop_poll_timer.timeout.connect(self._poll_stop_recording_complete)
+        self._stop_poll_timer.start()
+        logger.info("Started polling for recorder shutdown")
+
+    def _poll_stop_recording_complete(self):
+        rec = self._stopping_recorder
+        if rec is None:
+            if self._stop_poll_timer:
+                self._stop_poll_timer.stop()
+            return
+        if rec.is_alive():
+            return
+        if self._stop_poll_timer:
+            self._stop_poll_timer.stop()
+        logger.info("Recorder shutdown completed. Finalizing stop workflow.")
+        self._stopping_recorder = None
+        self._finalize_recording_stop(rec)
+
+    def _finalize_recording_stop(self, rec):
         self.action_record.setEnabled(True)
         print("Recording stopped.")
-        
+
         # Launch Video Editor
         if rec and not rec.audio_only:
             try:
                 from src.video_editor import VideoEditor
-                # 使用 final_output 而不是 temp_video，因为 temp_video 已被重命名
                 video_path = rec.final_output
                 mic_path = rec.temp_audio_mic
                 sys_path = rec.temp_audio_sys
-                # Robust extension replacement
                 base_path = os.path.splitext(video_path)[0]
                 meta_path = f"{base_path}.json"
                 output_path = rec.final_output
-                
+
                 if not hasattr(self, 'editors'):
                     self.editors = []
-                
+
                 editor = VideoEditor(video_path, mic_path, sys_path, meta_path, output_path)
                 self.editors.append(editor)
                 editor.show()
-                
+
                 # Cleanup closed editors
                 self.editors = [e for e in self.editors if e.isVisible()]
-            except Exception as e:
-                print(f"Failed to launch editor: {e}")
+                logger.info("Video editor opened for %s", video_path)
+            except Exception:
+                logger.exception("Failed to launch editor")
         
         # 录制结束后，重新显示选区面板，方便下一次操作
         # 使用 QTimer.singleShot 稍微延迟一下，避免与停止录制的 UI 更新冲突

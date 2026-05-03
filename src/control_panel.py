@@ -11,6 +11,31 @@ import numpy as np
 import logging
 
 logger = logging.getLogger("ControlPanel")
+_AUDIO_MONITOR_GUARD = []
+
+
+def _retain_audio_monitor(monitor):
+    if monitor is None:
+        return
+    if monitor not in _AUDIO_MONITOR_GUARD:
+        _AUDIO_MONITOR_GUARD.append(monitor)
+        logger.info("AudioMonitor retained. guarded_count=%s", len(_AUDIO_MONITOR_GUARD))
+
+
+def _release_audio_monitor(monitor):
+    if monitor is None:
+        return
+    try:
+        _AUDIO_MONITOR_GUARD.remove(monitor)
+    except ValueError:
+        pass
+    logger.info(
+        "AudioMonitor released. guarded_count=%s finished=%s running=%s",
+        len(_AUDIO_MONITOR_GUARD),
+        monitor.isFinished(),
+        monitor.isRunning(),
+    )
+    monitor.deleteLater()
 
 class AudioMonitor(QThread):
     level_changed = Signal(int)
@@ -21,22 +46,24 @@ class AudioMonitor(QThread):
         self.device_index = device_index
         self.is_running = True
         self.p = pyaudio.PyAudio()
+        self.stream = None
 
     def run(self):
         error_count = 0
         MAX_ERRORS = 5
         
         try:
-            stream = self.p.open(format=pyaudio.paInt16,
-                                 channels=1,
-                                 rate=44100,
-                                 input=True,
-                                 input_device_index=self.device_index,
-                                 frames_per_buffer=1024)
+            self.stream = self.p.open(format=pyaudio.paInt16,
+                                      channels=1,
+                                      rate=44100,
+                                      input=True,
+                                      input_device_index=self.device_index,
+                                      frames_per_buffer=1024)
+            logger.info("AudioMonitor started device_index=%s", self.device_index)
             
             while self.is_running:
                 try:
-                    data = stream.read(1024, exception_on_overflow=False)
+                    data = self.stream.read(1024, exception_on_overflow=False)
                     # Convert bytes to numpy array
                     audio_data = np.frombuffer(data, dtype=np.int16)
                     # Calculate RMS
@@ -62,19 +89,66 @@ class AudioMonitor(QThread):
 
                 self.msleep(50)
             
-            # Ensure stream is stopped/closed if we break out of loop
-            if stream.is_active():
-                stream.stop_stream()
-            stream.close()
-            
         except Exception as e:
-            print(f"Audio monitor error: {e}")
+            logger.error(f"Audio monitor error: {e}")
         finally:
-            pass # Don't terminate PyAudio here as it might be used elsewhere
+            self._cleanup_audio_backend()
+
+    def _cleanup_audio_backend(self):
+        stream = self.stream
+        self.stream = None
+        if stream is not None:
+            try:
+                if stream.is_active():
+                    stream.stop_stream()
+            except Exception:
+                pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+        try:
+            if self.p is not None:
+                self.p.terminate()
+        except Exception:
+            pass
 
     def stop(self):
+        logger.info("AudioMonitor stop requested device_index=%s running=%s", self.device_index, self.isRunning())
         self.is_running = False
-        self.wait()
+        self.requestInterruption()
+        stream = self.stream
+        if stream is not None:
+            try:
+                if stream.is_active():
+                    stream.stop_stream()
+            except Exception as e:
+                logger.warning("AudioMonitor stop_stream failed: %s", e)
+            try:
+                stream.close()
+            except Exception as e:
+                logger.warning("AudioMonitor close stream failed: %s", e)
+        if not self.wait(800):
+            logger.warning("AudioMonitor stop timeout. forcing terminate.")
+            self.terminate()
+            self.wait(300)
+        logger.info("AudioMonitor stop finished device_index=%s running=%s", self.device_index, self.isRunning())
+
+    def request_stop_nonblocking(self):
+        logger.info("AudioMonitor nonblocking stop requested device_index=%s running=%s", self.device_index, self.isRunning())
+        self.is_running = False
+        self.requestInterruption()
+        stream = self.stream
+        if stream is not None:
+            try:
+                if stream.is_active():
+                    stream.stop_stream()
+            except Exception as e:
+                logger.warning("AudioMonitor nonblocking stop_stream failed: %s", e)
+            try:
+                stream.close()
+            except Exception as e:
+                logger.warning("AudioMonitor nonblocking close stream failed: %s", e)
 
     def enterEvent(self, event):
         if self.text() and self.toolTip():
@@ -269,7 +343,7 @@ class ControlPanel(QFrame):
         self.btn_fullscreen.setCheckable(True)
         self.btn_fullscreen.setFixedSize(80, 60) # 增大2倍
         self.btn_fullscreen.installEventFilter(self) # Install event filter
-        self.btn_fullscreen.clicked.connect(lambda: self.set_mode('fullscreen'))
+        self.btn_fullscreen.clicked.connect(lambda: self._on_mode_button_clicked('fullscreen'))
         
         self.btn_area = QPushButton("⛶")
         self.btn_area.setToolTip("区域")
@@ -277,7 +351,7 @@ class ControlPanel(QFrame):
         self.btn_area.setCheckable(True)
         self.btn_area.setFixedSize(80, 60) # 增大2倍
         self.btn_area.installEventFilter(self) # Install event filter
-        self.btn_area.clicked.connect(lambda: self.set_mode('area'))
+        self.btn_area.clicked.connect(lambda: self._on_mode_button_clicked('area'))
 
         self.btn_camera_only = QPushButton("📷")
         self.btn_camera_only.setToolTip("只录摄像头")
@@ -285,7 +359,7 @@ class ControlPanel(QFrame):
         self.btn_camera_only.setCheckable(True)
         self.btn_camera_only.setFixedSize(80, 60) # 增大2倍
         self.btn_camera_only.installEventFilter(self) # Install event filter
-        self.btn_camera_only.clicked.connect(lambda: self.set_mode('camera_only'))
+        self.btn_camera_only.clicked.connect(lambda: self._on_mode_button_clicked('camera_only'))
         
         self.btn_audio_only = QPushButton("🎙️")
         self.btn_audio_only.setToolTip("只录音")
@@ -293,7 +367,7 @@ class ControlPanel(QFrame):
         self.btn_audio_only.setCheckable(True)
         self.btn_audio_only.setFixedSize(80, 60) # 增大2倍
         self.btn_audio_only.installEventFilter(self) # Install event filter
-        self.btn_audio_only.clicked.connect(lambda: self.set_mode('audio_only'))
+        self.btn_audio_only.clicked.connect(lambda: self._on_mode_button_clicked('audio_only'))
         
         row1.addWidget(self.btn_fullscreen)
         row1.addWidget(self.btn_area)
@@ -423,7 +497,7 @@ class ControlPanel(QFrame):
                 background-color: #ff6666;
             }
         """)
-        self.btn_record.clicked.connect(self.record_clicked.emit)
+        self.btn_record.clicked.connect(self._on_record_clicked)
         row2.addWidget(self.btn_record)
         
         # 滚动截图按钮 (默认隐藏)
@@ -450,6 +524,46 @@ class ControlPanel(QFrame):
         # 默认不选中任何模式
         self.current_mode = None # Initialize current_mode before calling set_mode
         self.set_mode(None)
+
+    def _log_panel_state(self, prefix):
+        try:
+            logger.info(
+                "%s | visible=%s hidden=%s active=%s enabled=%s geom=%s frame=%s mode=%s fullscreenBtn=%s areaBtn=%s recordVisible=%s",
+                prefix,
+                self.isVisible(),
+                self.isHidden(),
+                self.isActiveWindow(),
+                self.isEnabled(),
+                self.geometry(),
+                self.frameGeometry(),
+                self.current_mode,
+                self.btn_fullscreen.isChecked(),
+                self.btn_area.isChecked(),
+                self.btn_record.isVisible(),
+            )
+        except Exception as e:
+            logger.error("ControlPanel state log failed at %s: %s", prefix, e)
+
+    def _on_mode_button_clicked(self, mode):
+        logger.info(
+            "ControlPanel mode button clicked target=%s current_mode=%s visible=%s active=%s geom=%s",
+            mode,
+            self.current_mode,
+            self.isVisible(),
+            self.isActiveWindow(),
+            self.geometry(),
+        )
+        self.set_mode(mode)
+
+    def _on_record_clicked(self):
+        logger.info(
+            "ControlPanel record button clicked mode=%s visible=%s active=%s geom=%s",
+            self.current_mode,
+            self.isVisible(),
+            self.isActiveWindow(),
+            self.geometry(),
+        )
+        self.record_clicked.emit()
 
     def set_capture_mode(self):
         """切换到截图模式的简化界面"""
@@ -539,6 +653,7 @@ class ControlPanel(QFrame):
 
     def set_mode(self, mode):
         logger.info(f"ControlPanel switching mode to: {mode}")
+        self._log_panel_state(f"set_mode start target={mode}")
         
         # 如果点击的是当前已经激活的模式，则视为取消选中（Toggle off）
         # 但如果是从 None 切换到某个模式，则正常切换
@@ -625,6 +740,18 @@ class ControlPanel(QFrame):
              
         # 4. 调整窗口大小
         self.adjustSize()
+        logger.info(
+            "ControlPanel set_mode result mode=%s sizeWidgetsVisible=%s ratioVisible=%s camVisible=%s mouseVisible=%s recordText=%s size=%sx%s",
+            mode,
+            self.size_widgets.isVisible() if hasattr(self, 'size_widgets') else None,
+            self.btn_ratio.isVisible(),
+            self.btn_cam.isVisible() if hasattr(self, 'btn_cam') else None,
+            self.btn_mouse.isVisible() if hasattr(self, 'btn_mouse') else None,
+            self.btn_record.text(),
+            self.width(),
+            self.height(),
+        )
+        self._log_panel_state(f"set_mode end target={mode}")
         
         self.mode_changed.emit(mode)
 
@@ -682,6 +809,7 @@ class ControlPanel(QFrame):
     def update_size_display(self, w, h):
         self.width_input.setText(str(w))
         self.height_input.setText(str(h))
+        logger.info("ControlPanel update_size_display w=%s h=%s mode=%s", w, h, self.current_mode)
 
     def on_size_input(self):
         try:
@@ -711,6 +839,7 @@ class ControlPanel(QFrame):
             pass
 
     def start_audio_monitor(self):
+        logger.info("ControlPanel start_audio_monitor checked=%s current_mic_index=%s", self.btn_mic.isChecked(), self.current_mic_index)
         if self.audio_monitor:
             self.audio_monitor.stop()
         
@@ -773,10 +902,25 @@ class ControlPanel(QFrame):
         # Notify app that mic is off
         self.mic_toggled.emit(False)
 
-    def stop_audio_monitor(self):
+    def stop_audio_monitor(self, blocking=True):
+        logger.info("ControlPanel stop_audio_monitor has_monitor=%s blocking=%s", self.audio_monitor is not None, blocking)
         if self.audio_monitor:
-            self.audio_monitor.stop()
+            monitor = self.audio_monitor
             self.audio_monitor = None
+            try:
+                monitor.level_changed.disconnect(self.mic_level_bar.setValue)
+            except Exception:
+                pass
+            try:
+                monitor.error_occurred.disconnect(self.on_audio_error)
+            except Exception:
+                pass
+            if blocking:
+                monitor.stop()
+            else:
+                _retain_audio_monitor(monitor)
+                monitor.request_stop_nonblocking()
+                monitor.finished.connect(lambda m=monitor: _release_audio_monitor(m))
             self.mic_level_bar.setValue(0)
 
     def on_mic_click(self, checked):
@@ -854,7 +998,8 @@ class ControlPanel(QFrame):
         self.start_audio_monitor()
 
     def closeEvent(self, event):
-        self.stop_audio_monitor()
+        self._log_panel_state("ControlPanel closeEvent")
+        self.stop_audio_monitor(blocking=False)
         super().closeEvent(event)
 
     def on_cam_click(self, checked):
@@ -1056,6 +1201,7 @@ class ControlPanel(QFrame):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.old_pos = event.globalPosition().toPoint()
+            self._log_panel_state(f"ControlPanel mousePress pos={event.position()}")
 
     def mouseMoveEvent(self, event):
         if self.old_pos:

@@ -25,6 +25,7 @@ target/
 *.spec
 
 # User Data & Logs
+captures/
 recordings/
 logs/
 *.log

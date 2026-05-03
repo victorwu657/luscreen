@@ -242,6 +242,9 @@ class ScreenRecorder(threading.Thread):
         self.ffmpeg_process = None
         self.write_thread = None
         self.mouse_data = []
+        self._last_queue_full_log_at = 0.0
+        self._last_loop_error_log_at = 0.0
+        self._last_pipe_broken_log_at = 0.0
         
         # Camera recording robustness
         self.last_valid_camera_frame = None
@@ -396,6 +399,99 @@ class ScreenRecorder(threading.Thread):
             return
 
         self.logger.info(f"Merging {len(self.segments)} segments...")
+
+        def final_mix_video_with_audio(target_video_file):
+            if os.path.exists(target_video_file):
+                self.logger.info(f"Rust Core: Starting final audio mix for {target_video_file}")
+                ffmpeg_exe = get_ffmpeg_path()
+
+                has_mic = self.record_audio and os.path.exists(self.temp_audio_mic) and os.path.getsize(self.temp_audio_mic) > 0
+                has_sys = self.record_system_audio and os.path.exists(self.temp_audio_sys) and os.path.getsize(self.temp_audio_sys) > 0
+
+                mixed_audio_wav = target_video_file.replace('.mp4', '_mixed_audio.wav')
+                ready_to_mux = False
+                audio_source_to_mux = None
+
+                if has_mic or has_sys:
+                    try:
+                        cmd_mix_audio = [ffmpeg_exe, '-y']
+
+                        if has_mic:
+                            cmd_mix_audio.extend(['-i', self.temp_audio_mic])
+                        if has_sys:
+                            cmd_mix_audio.extend(['-i', self.temp_audio_sys])
+
+                        filter_complex = ""
+                        if has_mic and not has_sys:
+                            filter_complex = "[0:a]aresample=48000,volume=5.0[aout]"
+                        elif not has_mic and has_sys:
+                            filter_complex = "[0:a]aresample=48000,volume=1.5[aout]"
+                        elif has_mic and has_sys:
+                            filter_complex = "[0:a]aresample=48000,volume=5.0[mic];[1:a]aresample=48000,volume=1.5[sys];[mic][sys]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,volume=1.5[aout]"
+
+                        cmd_mix_audio.extend(['-filter_complex', filter_complex, '-map', '[aout]', '-c:a', 'pcm_s16le', '-ar', '48000', mixed_audio_wav])
+
+                        self.logger.info(f"Generating mixed audio WAV: {' '.join(cmd_mix_audio)}")
+                        res = subprocess.run(cmd_mix_audio, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+                        if res.returncode == 0 and os.path.exists(mixed_audio_wav) and os.path.getsize(mixed_audio_wav) > 0:
+                            self.logger.info(f"Mixed audio WAV created: {mixed_audio_wav}")
+                            ready_to_mux = True
+                            audio_source_to_mux = mixed_audio_wav
+                        else:
+                            self.logger.error(f"Failed to create mixed audio WAV. Code: {res.returncode}, Stderr: {res.stderr.decode('utf-8', errors='ignore')}")
+                            if has_mic:
+                                self.logger.info("Fallback: Using raw Mic audio for muxing")
+                                audio_source_to_mux = self.temp_audio_mic
+                                ready_to_mux = True
+                            elif has_sys:
+                                self.logger.info("Fallback: Using raw Sys audio for muxing")
+                                audio_source_to_mux = self.temp_audio_sys
+                                ready_to_mux = True
+
+                    except Exception as e:
+                        self.logger.error(f"Exception during audio mixing: {e}")
+
+                if ready_to_mux and audio_source_to_mux:
+                    final_output_temp = target_video_file.replace('.mp4', '_final_mux.mp4')
+                    try:
+                        cmd_mux = [
+                            ffmpeg_exe, '-y',
+                            '-i', target_video_file,
+                            '-i', audio_source_to_mux,
+                            '-c:v', 'copy',
+                            '-c:a', 'aac', '-b:a', '192k', '-ar', '48000',
+                            '-map', '0:v', '-map', '1:a',
+                            '-movflags', '+faststart',
+                            final_output_temp
+                        ]
+
+                        self.logger.info(f"Muxing Final Video: {' '.join(cmd_mux)}")
+                        res_mux = subprocess.run(cmd_mux, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+                        if res_mux.returncode == 0 and os.path.exists(final_output_temp) and os.path.getsize(final_output_temp) > 0:
+                            self.logger.info("Final Mux Successful.")
+                            try:
+                                os.remove(target_video_file)
+                                os.rename(final_output_temp, target_video_file)
+                            except Exception as e:
+                                self.logger.error(f"Failed to rename muxed file: {e}")
+                        else:
+                            self.logger.error(f"Final Mux Failed. Code: {res_mux.returncode}, Stderr: {res_mux.stderr.decode('utf-8', errors='ignore')}")
+                            print(f"FFmpeg Error: {res_mux.stderr.decode('utf-8', errors='ignore')}")
+
+                    except Exception as e:
+                        self.logger.error(f"Exception during final muxing: {e}")
+                else:
+                    self.logger.warning("No audio ready to mux. Output will be silent.")
+
+                if os.path.exists(mixed_audio_wav):
+                    try:
+                        os.remove(mixed_audio_wav)
+                    except:
+                        pass
+            else:
+                self.logger.error(f"Cannot find target video file for mixing: {target_video_file}")
         
         if len(self.segments) == 1:
             # Single segment case: just rename/move to expected temp paths
@@ -417,7 +513,8 @@ class ScreenRecorder(threading.Thread):
                 dest_meta = self.temp_video.replace('.mp4', '.json')
                 if os.path.exists(dest_meta): os.remove(dest_meta)
                 os.rename(seg['meta'], dest_meta)
-            
+
+            final_mix_video_with_audio(self.temp_video)
             return
 
         # Multiple segments case
@@ -561,117 +658,7 @@ class ScreenRecorder(threading.Thread):
 
         
         # 4. Final Mix: Combine Video + Mic + Sys into the final MP4
-        # Strategy: Mix audio to a single WAV first (safer), then mux with video
-        # CRITICAL: We must use self.output_filename here because previous step renamed temp_video to output_filename!
-        target_video_file = self.output_filename if os.path.exists(self.output_filename) else self.temp_video
-
-        if os.path.exists(target_video_file):
-            self.logger.info(f"Rust Core: Starting final audio mix for {target_video_file}")
-            ffmpeg_exe = get_ffmpeg_path()
-            
-            has_mic = self.record_audio and os.path.exists(self.temp_audio_mic) and os.path.getsize(self.temp_audio_mic) > 0
-            has_sys = self.record_system_audio and os.path.exists(self.temp_audio_sys) and os.path.getsize(self.temp_audio_sys) > 0
-            
-            mixed_audio_wav = target_video_file.replace('.mp4', '_mixed_audio.wav')
-            ready_to_mux = False
-            audio_source_to_mux = None
-
-            # --- Step A: Create Mixed Audio WAV ---
-            if has_mic or has_sys:
-                try:
-                    cmd_mix_audio = [ffmpeg_exe, '-y']
-                    inputs_count = 0
-                    
-                    if has_mic:
-                        cmd_mix_audio.extend(['-i', self.temp_audio_mic])
-                        inputs_count += 1
-                    if has_sys:
-                        cmd_mix_audio.extend(['-i', self.temp_audio_sys])
-                        inputs_count += 1
-                        
-                    filter_complex = ""
-                    # Mic only
-                    if has_mic and not has_sys:
-                        # [0:a] is mic
-                        filter_complex = "[0:a]aresample=48000,volume=5.0[aout]"
-                    # Sys only
-                    elif not has_mic and has_sys:
-                        # [0:a] is sys
-                        filter_complex = "[0:a]aresample=48000,volume=1.5[aout]"
-                    # Both
-                    elif has_mic and has_sys:
-                        # [0:a] is mic, [1:a] is sys
-                        # duration=longest is critical to avoid cutting audio
-                        filter_complex = "[0:a]aresample=48000,volume=5.0[mic];[1:a]aresample=48000,volume=1.5[sys];[mic][sys]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,volume=1.5[aout]"
-                    
-                    cmd_mix_audio.extend(['-filter_complex', filter_complex, '-map', '[aout]', '-c:a', 'pcm_s16le', '-ar', '48000', mixed_audio_wav])
-                    
-                    self.logger.info(f"Generating mixed audio WAV: {' '.join(cmd_mix_audio)}")
-                    res = subprocess.run(cmd_mix_audio, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    
-                    if res.returncode == 0 and os.path.exists(mixed_audio_wav) and os.path.getsize(mixed_audio_wav) > 0:
-                        self.logger.info(f"Mixed audio WAV created: {mixed_audio_wav}")
-                        ready_to_mux = True
-                        audio_source_to_mux = mixed_audio_wav
-                    else:
-                        self.logger.error(f"Failed to create mixed audio WAV. Code: {res.returncode}, Stderr: {res.stderr.decode('utf-8', errors='ignore')}")
-                        # Fallback: Try to use just Mic if Mix failed
-                        if has_mic:
-                            self.logger.info("Fallback: Using raw Mic audio for muxing")
-                            audio_source_to_mux = self.temp_audio_mic
-                            ready_to_mux = True
-                        elif has_sys:
-                             self.logger.info("Fallback: Using raw Sys audio for muxing")
-                             audio_source_to_mux = self.temp_audio_sys
-                             ready_to_mux = True
-
-                except Exception as e:
-                    self.logger.error(f"Exception during audio mixing: {e}")
-
-            # --- Step B: Mux Video + Audio ---
-            if ready_to_mux and audio_source_to_mux:
-                final_output_temp = target_video_file.replace('.mp4', '_final_mux.mp4')
-                try:
-                    # Simple Mux: Video Copy + Audio Encode
-                    cmd_mux = [
-                        ffmpeg_exe, '-y',
-                        '-i', target_video_file,
-                        '-i', audio_source_to_mux,
-                        '-c:v', 'copy',
-                        '-c:a', 'aac', '-b:a', '192k', '-ar', '48000',
-                        '-map', '0:v', '-map', '1:a',
-                        '-movflags', '+faststart',
-                        final_output_temp
-                    ]
-                    
-                    self.logger.info(f"Muxing Final Video: {' '.join(cmd_mux)}")
-                    res_mux = subprocess.run(cmd_mux, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    
-                    if res_mux.returncode == 0 and os.path.exists(final_output_temp) and os.path.getsize(final_output_temp) > 0:
-                        self.logger.info("Final Mux Successful.")
-                        # Replace target video with muxed video
-                        try:
-                            os.remove(target_video_file)
-                            os.rename(final_output_temp, target_video_file)
-                        except Exception as e:
-                            self.logger.error(f"Failed to rename muxed file: {e}")
-                    else:
-                        self.logger.error(f"Final Mux Failed. Code: {res_mux.returncode}, Stderr: {res_mux.stderr.decode('utf-8', errors='ignore')}")
-                        # Attempt to print stderr to console for user to see
-                        print(f"FFmpeg Error: {res_mux.stderr.decode('utf-8', errors='ignore')}")
-
-                except Exception as e:
-                    self.logger.error(f"Exception during final muxing: {e}")
-            else:
-                self.logger.warning("No audio ready to mux. Output will be silent.")
-
-            # Cleanup mixed wav
-            if os.path.exists(mixed_audio_wav):
-                try:
-                    os.remove(mixed_audio_wav)
-                except: pass
-        else:
-             self.logger.error(f"Cannot find target video file for mixing: {target_video_file}")
+        final_mix_video_with_audio(self.temp_video)
         
         # 5. Cleanup segment files
         for seg in self.segments:
@@ -752,17 +739,28 @@ class ScreenRecorder(threading.Thread):
         # Helper to stop recorders safely
         def stop_current_recorders(save_segment=True):
             try:
-                # Stop Rust Recorder
-                mouse_data = recorder.stop()
-                
-                # Stop Audio Recorders
-                if self.mic_recorder: 
+                self.logger.info("stop_current_recorders start seg=%s save_segment=%s", segment_index, save_segment)
+
+                # Stop Audio Recorders first so Rust core can observe EOF on audio streams.
+                if self.mic_recorder:
+                    self.logger.info("Stopping mic recorder before rust stop. alive=%s", self.mic_recorder.is_alive())
                     self.mic_recorder.stop()
-                    if self.mic_recorder.is_alive(): self.mic_recorder.join(timeout=2.0)
+                    self.logger.info("Mic recorder stop finished alive=%s", self.mic_recorder.is_alive())
+                    if self.mic_recorder.is_alive():
+                        self.logger.warning("Mic recorder still alive before rust stop")
                 
-                if self.sys_recorder: 
-                    self.sys_recorder.stop()
-                    if self.sys_recorder.is_alive(): self.sys_recorder.join(timeout=2.0)
+                if self.sys_recorder:
+                    self.logger.info("Stopping system audio recorder before rust stop. alive=%s", self.sys_recorder.is_alive())
+                    self.sys_recorder.stop_event.set()
+                    self.sys_recorder.join(timeout=3.0)
+                    self.logger.info("System audio recorder stop finished alive=%s", self.sys_recorder.is_alive())
+                    if self.sys_recorder.is_alive():
+                        self.logger.warning("System audio recorder still alive before rust stop")
+
+                # Stop Rust Recorder after audio streams have closed.
+                self.logger.info("Stopping rust recorder after audio recorders")
+                mouse_data = recorder.stop()
+                self.logger.info("Rust recorder stop finished seg=%s mouse_events=%s", segment_index, len(mouse_data) if mouse_data else 0)
 
                 if save_segment:
                     # Log Segment Audio Sizes
@@ -1213,7 +1211,7 @@ class ScreenRecorder(threading.Thread):
                 self.sys_recorder = None
         
         frame_duration = 1.0 / self.fps
-        print(f"Started recording region: {self.region}")
+        self.logger.info(f"Started recording region: {self.region}")
         
         start_time = time.time()
         next_frame_time = start_time
@@ -1340,7 +1338,16 @@ class ScreenRecorder(threading.Thread):
                         }
                         self.mouse_data.append(current_meta)
                     except queue.Full:
-                        print("Warning: Frame queue full, skipping frame")
+                        now = time.time()
+                        if now - self._last_queue_full_log_at >= 2.0:
+                            self._last_queue_full_log_at = now
+                            self.logger.warning(
+                                "Frame queue full, skipping frame. qsize=%s region=%sx%s fps=%s",
+                                self.frame_queue.qsize() if self.frame_queue else -1,
+                                self.region["width"],
+                                self.region["height"],
+                                self.fps,
+                            )
                     
                     # 补帧逻辑
                     current_time = time.time()
@@ -1364,10 +1371,16 @@ class ScreenRecorder(threading.Thread):
                             next_frame_time += missed_frames * frame_duration
                             
             except (BrokenPipeError, IOError):
-                print("FFmpeg process pipe broken, stopping recording.")
+                now = time.time()
+                if now - self._last_pipe_broken_log_at >= 2.0:
+                    self._last_pipe_broken_log_at = now
+                    self.logger.error("FFmpeg process pipe broken, stopping recording.")
                 break
             except Exception as e:
-                print(f"Error during recording: {e}")
+                now = time.time()
+                if now - self._last_loop_error_log_at >= 1.0:
+                    self._last_loop_error_log_at = now
+                    self.logger.exception(f"Error during recording loop: {e}")
             
             # 更新下一帧理论时间
             next_frame_time += frame_duration
@@ -1475,7 +1488,7 @@ class ScreenRecorder(threading.Thread):
             else:
                  self.logger.error(f"CRITICAL: Final output file DOES NOT EXIST: {self.final_output}")
         
-        print("Recording stopped. File ready.")
+        self.logger.info("Recording stopped. File ready.")
         
         # 5. 执行后续处理 (生成预览、打开文件夹等)
         self._finalize_recording()
@@ -1492,12 +1505,12 @@ class ScreenRecorder(threading.Thread):
     def pause(self):
         self.is_paused = True
         self.pause_event.clear()
-        print("Recording paused")
+        self.logger.info("Recording paused")
 
     def resume(self):
         self.is_paused = False
         self.pause_event.set()
-        print("Recording resumed")
+        self.logger.info("Recording resumed")
 
     def merge_av(self):
         self.logger.info("Starting merge_av")

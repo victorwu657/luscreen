@@ -1,5 +1,5 @@
 {
-    "version": "0.047.0",
+    "version": "0.047.1",
     "url": "https://luscreen.com/downloads/luscreen.zip",
-    "notes": "更新日志：修复了Rust核心可用性检测与加载回退问题"
+    "notes": "更新日志：修复了视频录制问题"
 }

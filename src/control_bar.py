@@ -4,6 +4,9 @@ from PySide6.QtGui import QIcon
 import ctypes
 from ctypes import wintypes
 import os
+import logging
+
+logger = logging.getLogger("ControlBar")
 
 class ControlBar(QWidget):
     stop_clicked = Signal()
@@ -71,7 +74,7 @@ class ControlBar(QWidget):
         self.stop_btn.setFixedSize(30, 30)
         # 这里可以用图标，暂时用方形方块代替停止图标
         self.stop_btn.setText("■") 
-        self.stop_btn.clicked.connect(self.stop_clicked.emit)
+        self.stop_btn.clicked.connect(self.on_stop_clicked)
         layout.addWidget(self.stop_btn)
 
         # 录制计时逻辑
@@ -171,7 +174,12 @@ class ControlBar(QWidget):
         self.move(final_x, final_y)
 
     def on_pause_clicked(self):
+        logger.info("ControlBar pause button clicked seconds=%s", self.seconds)
         self.pause_clicked.emit()
+
+    def on_stop_clicked(self):
+        logger.info("ControlBar stop button clicked seconds=%s", self.seconds)
+        self.stop_clicked.emit()
 
     def update_timer(self):
         self.seconds += 1

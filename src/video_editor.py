@@ -3051,7 +3051,8 @@ class VideoEditor(QWidget):
 
     def init_player(self):
         try:
-            self.logger.info(f"Initializing player with source: {self.preview_path if self.preview_path else self.video_path}")
+            source = self.preview_path if self.preview_path and os.path.exists(self.preview_path) else self.video_path
+            self.logger.info(f"Initializing player with source: {source}")
             self.player = QMediaPlayer()
             
             # Use QVideoSink for custom rendering (to support rounded corners in preview)
@@ -3071,7 +3072,6 @@ class VideoEditor(QWidget):
             self.player.errorOccurred.connect(lambda error, errorString: self.logger.error(f"Player Error: {error} - {errorString}"))
             self.player.playbackStateChanged.connect(lambda state: self.logger.info(f"Playback state changed to: {state}"))
             
-            source = self.preview_path if self.preview_path else self.video_path
             if not source or not os.path.exists(source):
                 print(f"Error: Video source not found: {source}")
                 return
@@ -3423,6 +3423,7 @@ class VideoEditor(QWidget):
         # 只有在完全没有额外音轨的情况下，才跳过预览生成
         if not force and not has_mic and not has_sys:
             self.logger.info("No external audio files and not forced. Using original video.")
+            self.preview_path = None
             self.init_player()
             return
 

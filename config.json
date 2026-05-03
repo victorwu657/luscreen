@@ -15,7 +15,7 @@
     "save_path_capture": "F:\\luscreen\\captures",
     "save_path_record": "F:\\luscreen\\recordings",
     "video_quality": "2k_30",
-    "gpu_acceleration": true,
+    "gpu_acceleration": false,
     "subtitle_offset_ms": 0,
     "subtitle_offset_start_ms": 0,
     "subtitle_offset_end_ms": -1000,

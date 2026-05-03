@@ -232,9 +232,10 @@ class SystemAudioRecorder(threading.Thread):
             self.save_to_file()
 
     def stop(self):
-        self.logger.info("Stop requested")
+        self.logger.info("Stop requested alive=%s paused=%s", self.is_alive(), self.is_paused)
         self.stop_event.set()
         self.join()
+        self.logger.info("Stop completed alive=%s", self.is_alive())
 
     def pause(self):
         self.logger.info("Paused")
