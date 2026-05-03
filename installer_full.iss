@@ -1,6 +1,8 @@
 ; LuScreen 完整版安装脚本（含字幕功能）
 #define MyAppName "LuScreen Full"
-#define MyAppVersion "0.046.9"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.0.0"
+#endif
 #define MyAppPublisher "LuScreen Team"
 #define MyAppURL "https://luscreen.com"
 #define MyAppExeName "LuScreen.exe"

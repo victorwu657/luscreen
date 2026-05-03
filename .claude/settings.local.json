@@ -23,7 +23,9 @@
       "Bash(./build_and_pack.bat:*)",
       "Bash(\"D:/ProgramFile/Inno Setup 6/ISCC.exe\":*)",
       "Bash(set LUSCREEN_SKIP_PIP=1:*)",
-      "Bash(./pack_subtitle_runtime.bat:*)"
+      "Bash(./pack_subtitle_runtime.bat:*)",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)"
     ]
   }
 }

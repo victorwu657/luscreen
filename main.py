@@ -1,7 +1,6 @@
 import sys
 import os
 import subprocess
-import faulthandler
 from datetime import datetime
 
 if "--subtitle-service" in sys.argv:
@@ -30,20 +29,29 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("QT_DISABLE_HW_TEXTURES_CONVERSION", "1")
 os.environ.setdefault("QT_FFMPEG_DECODING_HW_DEVICE_TYPES", ",")
 
-try:
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    logs_dir = os.path.join(base_dir, "logs")
-    os.makedirs(logs_dir, exist_ok=True)
-    fault_path = os.path.join(logs_dir, f"faulthandler_{datetime.now().strftime('%Y%m%d')}.log")
-    faulthandler.enable(open(fault_path, "a", encoding="utf-8"))
-except Exception:
-    pass
 # 初始化全局日志和异常捕获
-from src.logger import setup_global_logger, handle_exception
+from src.logger import (
+    install_faulthandler,
+    install_global_exception_hooks,
+    setup_global_logger,
+)
 # 立即安装钩子
-sys.excepthook = handle_exception
+install_global_exception_hooks()
 # 初始化日志记录器 (启用 stdout/stderr 重定向)
 logger = setup_global_logger(redirect_stdout=True)
+fault_path = install_faulthandler()
+logger.info(
+    "Startup context | pid=%s frozen=%s exe=%s cwd=%s",
+    os.getpid(),
+    getattr(sys, "frozen", False),
+    sys.executable,
+    os.getcwd(),
+)
+logger.info("Startup argv=%r", sys.argv)
+if fault_path:
+    logger.info("Faulthandler enabled: %s", fault_path)
+else:
+    logger.warning("Faulthandler was not enabled.")
 
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox, QWidget, QFileDialog
 from PySide6.QtCore import Qt, QTimer, QSharedMemory, QRect, qInstallMessageHandler, QtMsgType

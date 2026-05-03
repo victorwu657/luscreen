@@ -897,6 +897,7 @@ class EditToolBar(QWidget):
         
         tool_defs = [
             ('move', '✋', '移动元素'),
+            ('select', None, '选择'),
             ('crop', '✂️', '剪裁'),
             ('rect', '⬜', '矩形'),
             ('circle', '⭕', '圆形'),
@@ -910,7 +911,12 @@ class EditToolBar(QWidget):
         ]
         
         for key, icon, tooltip in tool_defs:
-            btn = QPushButton(icon)
+            if key == 'select':
+                btn = QPushButton()
+                btn.setIcon(self._create_dashed_rect_icon())
+                btn.setIconSize(QSize(20, 20))
+            else:
+                btn = QPushButton(icon)
             btn.setToolTip(tooltip)
             btn.setCheckable(True)
             btn.setFixedSize(30, 30)
@@ -1074,6 +1080,19 @@ class EditToolBar(QWidget):
         btn.setChecked(True)
         self.font_size_changed.emit(size)
 
+    def _create_dashed_rect_icon(self):
+        pm = QPixmap(20, 20)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(60, 60, 60), 2)
+        pen.setStyle(Qt.DashLine)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(3, 3, 14, 14)
+        p.end()
+        return QIcon(pm)
+
     def select_tool(self, key):
         # Uncheck others
         for k, btn in self.tools.items():
@@ -1179,6 +1198,9 @@ class ScreenshotEditor(QWidget):
         self.selected_item_index = -1
         self.last_mouse_pos = QPoint()
         self.clipboard_item = None # For copying items
+        self.region_select_rect = None
+        self.region_select_start = QPointF()
+        self.is_region_selecting = False
         
         # View Offset for Panning (Standalone mode)
         self.view_offset = QPoint(0, 0)
@@ -1466,6 +1488,10 @@ class ScreenshotEditor(QWidget):
             self.laser_timer.stop()
             self.refresh_canvas()
 
+        if tool != 'select':
+            self.region_select_rect = None
+            self.is_region_selecting = False
+
         self.current_tool = tool
         logger.info(f"Tool selected: {tool}")
         self.selected_item_index = -1 # Reset selection when changing tools
@@ -1473,6 +1499,8 @@ class ScreenshotEditor(QWidget):
         
         if tool == 'crop':
             self.init_crop()
+            self.setCursor(Qt.CrossCursor)
+        elif tool == 'select':
             self.setCursor(Qt.CrossCursor)
         elif tool == 'text':
             self.setCursor(Qt.IBeamCursor)
@@ -1598,9 +1626,8 @@ class ScreenshotEditor(QWidget):
         elif action == 'save':
             self.save_image()
         elif action == 'copy':
-            # Toolbar copy button should always copy the final image to system clipboard
-            # Ctrl+C can be used to copy selected items internally
-            self.copy_image() 
+            if not self.copy_region_selection_to_clipboard():
+                self.copy_image()
         elif action == 'minimize':
             self.showMinimized()
         elif action == 'close':
@@ -2838,6 +2865,32 @@ class ScreenshotEditor(QWidget):
         for p in handles:
             painter.drawRect(QRectF(p.x() - half, p.y() - half, handle_size, handle_size))
 
+    def draw_region_selection_overlay(self, painter):
+        if not self.region_select_rect:
+            return
+        try:
+            rect = self.region_select_rect.normalized()
+            if rect.width() < 2 or rect.height() < 2:
+                return
+            painter.save()
+            pen = QPen(QColor(0, 122, 255))
+            pen.setStyle(Qt.DashLine)
+            if getattr(self, "mode", None) == "standalone":
+                zl = getattr(self, "zoom_level", 1.0) or 1.0
+                pen.setWidthF(1.0 / max(0.1, float(zl)))
+            else:
+                pen.setWidth(1)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(rect)
+            painter.restore()
+        except Exception as e:
+            logger.error(f"Error drawing region selection overlay: {e}", exc_info=True)
+            try:
+                painter.restore()
+            except Exception:
+                pass
+
     def hit_test_handles(self, pos):
         if self.selected_item_index == -1 or self.selected_item_index >= len(self.items):
             return -1
@@ -2975,6 +3028,7 @@ class ScreenshotEditor(QWidget):
             
         # Draw Selection Overlay
         self.draw_selection_overlay(painter)
+        self.draw_region_selection_overlay(painter)
             
         # Draw Crop Overlay
         if self.current_tool == 'crop' and self.crop_rect:
@@ -3412,6 +3466,17 @@ class ScreenshotEditor(QWidget):
                         self.refresh_canvas()
                     return
 
+                if self.current_tool == 'select':
+                    self.selected_item_index = -1
+                    self.prop_panel.clear_ui()
+                    self.prop_panel.hide()
+                    self.is_region_selecting = True
+                    self.region_select_start = QPointF(local_pos)
+                    self.region_select_rect = QRectF(self.region_select_start, self.region_select_start)
+                    logger.info(f"Region selection started: {self.region_select_start}")
+                    self.refresh_canvas()
+                    return
+
                 if self.current_tool == 'move':
                     # Check for resize handles first
                     handle = self.hit_test_handles(local_pos)
@@ -3611,6 +3676,17 @@ class ScreenshotEditor(QWidget):
             self.refresh_canvas()
             return
 
+        if self.current_tool == 'select' and getattr(self, 'is_region_selecting', False):
+            try:
+                img_w, img_h = self.original_pixmap.width(), self.original_pixmap.height()
+                rect = QRectF(self.region_select_start, QPointF(local_pos)).normalized()
+                rect = rect.intersected(QRectF(0, 0, img_w, img_h))
+                self.region_select_rect = rect
+                self.refresh_canvas()
+            except Exception as e:
+                logger.error(f"Error updating region selection rect: {e}", exc_info=True)
+            return
+
         if self.selected_item_index != -1 and (self.current_tool == 'move' or not self.current_tool):
             # 移动选中的图形元素 - 仅当按下左键时
             if event.buttons() & Qt.LeftButton:
@@ -3801,6 +3877,23 @@ class ScreenshotEditor(QWidget):
             self.refresh_canvas()
             return
 
+        if self.current_tool == 'select' and getattr(self, 'is_region_selecting', False):
+            self.is_region_selecting = False
+            try:
+                if self.region_select_rect:
+                    rect = self.region_select_rect.normalized()
+                    if rect.width() < 2 or rect.height() < 2:
+                        self.region_select_rect = None
+                    else:
+                        self.region_select_rect = rect
+                logger.info(f"Region selection finalized: {self.region_select_rect}")
+                self.refresh_canvas()
+            except Exception as e:
+                logger.error(f"Error finalizing region selection: {e}", exc_info=True)
+                self.region_select_rect = None
+                self.refresh_canvas()
+            return
+
         if self.selected_item_index != -1:
             # Keep selected item index for further actions (like delete)
             # Only reset if we clicked outside (handled in mousePress)
@@ -3849,6 +3942,8 @@ class ScreenshotEditor(QWidget):
         self.save_state()
 
     def copy_item(self):
+        if self.copy_region_selection_to_clipboard():
+            return
         if self.selected_item_index != -1:
             try:
                 # Manual deep copy to handle QPixmap and QRectF safely
@@ -3875,6 +3970,37 @@ class ScreenshotEditor(QWidget):
         else:
             # Fallback to copy entire image to system clipboard
             self.copy_image()
+
+    def copy_region_selection_to_clipboard(self) -> bool:
+        try:
+            if not self.region_select_rect:
+                return False
+            rectf = self.region_select_rect.normalized()
+            if rectf.width() < 2 or rectf.height() < 2:
+                return False
+            src = self.get_final_image()
+            if src.isNull():
+                return False
+            img_rectf = QRectF(src.rect())
+            rectf = rectf.intersected(img_rectf)
+            if rectf.width() < 2 or rectf.height() < 2:
+                return False
+            if hasattr(rectf, "toAlignedRect"):
+                rect = rectf.toAlignedRect()
+            else:
+                rect = rectf.toRect()
+            rect = rect.intersected(src.rect())
+            if rect.isEmpty():
+                return False
+            cropped = src.copy(rect)
+            if cropped.isNull():
+                return False
+            QApplication.clipboard().setPixmap(cropped)
+            logger.info(f"Region copied to system clipboard: {rect.width()}x{rect.height()}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to copy region selection to clipboard: {e}", exc_info=True)
+            return False
 
     def paste_item(self):
         if not self.clipboard_item: return
@@ -3928,10 +4054,15 @@ class ScreenshotEditor(QWidget):
             # Select the new item
             self.selected_item_index = len(self.items) - 1
             
-            # Show prop panel if applicable
-            self.prop_panel.update_ui(new_item)
-            self.prop_panel.show()
-            self.update_toolbar_pos()
+            # In smart board mode, pasted images should not immediately open the property panel.
+            if self.mode == 'standalone' and new_item.get('type') == 'image':
+                self.prop_panel.clear_ui()
+                self.prop_panel.hide()
+                logger.info("Image pasted from internal clipboard without opening property panel")
+            else:
+                self.prop_panel.update_ui(new_item)
+                self.prop_panel.show()
+                self.update_toolbar_pos()
             
             self.save_state()
             self.refresh_canvas()
@@ -3971,12 +4102,11 @@ class ScreenshotEditor(QWidget):
             }
             self.items.append(item)
             self.selected_item_index = len(self.items) - 1
-            self.prop_panel.update_ui(item)
-            self.prop_panel.show()
-            self.update_toolbar_pos()
+            self.prop_panel.clear_ui()
+            self.prop_panel.hide()
             self.save_state()
             self.refresh_canvas()
-            logger.info("Image pasted from system clipboard")
+            logger.info("Image pasted from system clipboard without opening property panel")
             return True
         except Exception as e:
             logger.error(f"Paste system clipboard image failed: {e}", exc_info=True)
@@ -4004,7 +4134,11 @@ class ScreenshotEditor(QWidget):
                         return
 
             if event.key() == Qt.Key_Escape:
-                if self.current_tool == 'crop':
+                if self.current_tool == 'select' and self.region_select_rect:
+                    self.region_select_rect = None
+                    self.is_region_selecting = False
+                    self.refresh_canvas()
+                elif self.current_tool == 'crop':
                     self.cancel_crop()
                 elif hasattr(self, 'active_text_editor') and self.active_text_editor:
                     self.cancel_text_editor()
@@ -4223,6 +4357,7 @@ class ScreenshotEditor(QWidget):
 
                     if idx == self.active_page_index:
                         self.draw_selection_overlay(painter)
+                        self.draw_region_selection_overlay(painter)
                         if self.current_tool == 'crop' and self.crop_rect:
                             self.draw_crop_overlay(painter)
                         if self.is_drawing and self.current_tool and self.current_tool != 'move':
@@ -4301,6 +4436,7 @@ class ScreenshotEditor(QWidget):
                 
             # Draw Selection Overlay
             self.draw_selection_overlay(painter)
+            self.draw_region_selection_overlay(painter)
                 
             # Draw Crop Overlay
             if self.current_tool == 'crop' and self.crop_rect:
@@ -4336,6 +4472,7 @@ class ScreenshotEditor(QWidget):
             self._draw_single_item(painter, item)
             
         self.draw_selection_overlay(painter)
+        self.draw_region_selection_overlay(painter)
             
         if self.is_drawing and self.current_tool and self.current_tool != 'move':
             temp_item = {
