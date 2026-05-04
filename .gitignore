@@ -24,6 +24,11 @@ luscreen.build/
 target/
 *.spec
 
+# Large artifacts / caches (Do NOT commit)
+downloads/
+dist_installer/
+models/whisperx/
+
 # User Data & Logs
 captures/
 recordings/
