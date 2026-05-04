@@ -32,6 +32,10 @@ models/whisperx/
 # Third-party demos / unrelated samples
 examples/
 
+# Dev-only folders (Do NOT commit)
+tests/
+tools/
+
 # Crash dump artifacts
 nuitka-crash-report.xml
 
