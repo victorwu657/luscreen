@@ -48,6 +48,7 @@ dist_wheels/
 .idea/
 .trae/
 .claude/
+AICoding/
 *.swp
 *~
 
