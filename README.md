@@ -5,6 +5,20 @@
 报bug请把logs文件夹里面的log文件和截图描述发到76697742@qq.com
 微信交流群：wuhui8118
 
+## License
+
+中文（摘要）：
+
+- 个人用户：可免费使用、修改与分发本仓库源代码。
+- 二次分发：如你修改或再发布（含网络提供服务），必须继续以相同许可证开源并保留版权与许可证声明。
+- 企业/组织闭源商用：如无法或不希望遵守 AGPL 的开源义务，请购买商业授权（见 [LICENSE](LICENSE) 与 [COMMERCIAL_LICENSE](COMMERCIAL_LICENSE)）。
+
+English (Summary):
+
+- Personal users: free to use, modify, and redistribute the source code.
+- Redistributions (including network use): if you modify or redistribute, you must keep the same license and provide complete corresponding source.
+- Enterprises/organizations for closed-source commercial use: if you cannot or do not want to comply with AGPL obligations, please obtain a commercial license (see [LICENSE](LICENSE) and [COMMERCIAL_LICENSE](COMMERCIAL_LICENSE)).
+
 ## 1. 产品概述 (Product Overview)
 
 LuScreen 是一款专为 Windows 平台打造的**高性能、全功能屏幕创作工具**。它不仅支持高帧率录屏和长截图，更创新性地引入了**手绘风格标注**，让技术文档和演示视频充满温度。无论是软件演示、Bug 汇报、教学课件制作，还是日常灵感捕捉，LuScreen 都能提供流畅、专业的体验。

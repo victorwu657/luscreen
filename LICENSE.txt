@@ -1,24 +1,7 @@
-LuScreen 软件许可协议
+LuScreen 开源许可说明
 
 版权所有 (C) 2024-2026 LuScreen Team
 
-本软件采用专有许可证。
+本仓库源代码采用 GNU Affero General Public License v3.0（AGPL-3.0-only）授权，详见根目录 LICENSE。
 
-免费版用户可以：
-- 使用基础录屏功能（1080p/30fps）
-- 使用截图和基础标注功能
-- 个人非商业使用
-
-专业版用户可以：
-- 解锁 4K/60fps 高清录制
-- GPU 硬件加速
-- 商业使用授权
-
-未经授权，不得：
-- 反向工程、反编译或反汇编本软件
-- 移除或修改任何版权声明
-- 将本软件用于非法用途
-
-详细条款请访问：https://luscreen.com/license
-
-联系方式：76697742@qq.com
+商业授权：如企业/组织希望在闭源场景中使用、集成或分发 LuScreen（或希望获得更宽松的许可豁免），请参见 COMMERCIAL_LICENSE，并联系 76697742@qq.com。

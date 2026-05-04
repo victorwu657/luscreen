@@ -55,6 +55,10 @@ Desktop.ini
 .env.local
 config.json
 
+# Secrets (Do NOT commit)
+tools/private_key.pem
+tools/public_key.pem
+
 # Ignore coverage reports
 htmlcov/
 .coverage

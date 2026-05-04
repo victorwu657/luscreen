@@ -1,0 +1,25 @@
+name: license-check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  spdx-headers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check SPDX headers on added files
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: |
+          python tools/license_headers.py --pr --base-ref "${GITHUB_BASE_REF}"
