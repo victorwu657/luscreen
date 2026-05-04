@@ -29,6 +29,12 @@ downloads/
 dist_installer/
 models/whisperx/
 
+# Third-party demos / unrelated samples
+examples/
+
+# Crash dump artifacts
+nuitka-crash-report.xml
+
 # User Data & Logs
 captures/
 recordings/
