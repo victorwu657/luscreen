@@ -61,7 +61,28 @@ LuScreen 是一款专为 Windows 平台打造的**高性能、全功能屏幕创
     *   低资源占用，录制时对系统性能影响极小。
     *   针对高 DPI 屏幕（2K/4K）进行了缩放适配，界面清晰不模糊。
 
-## 4. 商业授权 (Licensing)
+## 4. 快速上手指南 (Quick Start)
+1.  **启动**：双击桌面图标或右下角托盘图标。
+2.  **录屏**：点击托盘菜单“录制屏幕”或使用快捷键 `Ctrl+F1`，框选区域后点击开始。
+3.  **截图**：点击托盘菜单“区域截图”，框选完成后自动进入编辑器。
+4.  **设置**：在主界面或托盘菜单中进入设置，调节画质、音频源及快捷键。
+
+常用快捷键：
+
+- `Ctrl+F1`：开始录制
+- `Ctrl+F2`：暂停/继续录制
+- `Ctrl+F3`：停止录制
+- `Ctrl+L`：呼出主菜单
+- 支持用户自定义快捷键，适应个人习惯。
+
+## 5. 字幕生成（WhisperX）下载说明
+
+- 默认分发 **CPU 版安装包**，所有机器都可生成字幕（速度取决于 CPU 性能）。
+- 若电脑具备 NVIDIA GPU 且希望加速字幕生成，请下载 **GPU 版安装包**（单独提供下载地址）。
+- WhisperX 本地模型不随安装包分发：首次使用可能会自动下载模型文件；也可以将模型放入 `models/whisperx/whisper` 以离线使用。
+- 相关说明见仓库文档：docs/gpu_subtitle_setup.md
+
+## 6. 商业授权 (Licensing)
 LuScreen 采用 **Freemium (免费增值)** 模式：
 *   **免费版**：包含基础录屏（1080p/30fps）、截图、基础标注功能。
 *   **专业版**：解锁2k 4K/60fps 录制，GPU 硬件加速编码等高级功能。
@@ -77,27 +98,6 @@ English Summary:
 - Personal users: free to use, modify, and redistribute the source code.
 - Redistributions (including network use): if you modify or redistribute, you must keep the same license and provide complete corresponding source.
 - Enterprises/organizations for closed-source commercial use: if you cannot or do not want to comply with AGPL obligations, please obtain a commercial license (see [LICENSE](LICENSE) and [COMMERCIAL_LICENSE](COMMERCIAL_LICENSE)).
-
-## 5. 快速上手指南 (Quick Start)
-1.  **启动**：双击桌面图标或右下角托盘图标。
-2.  **录屏**：点击托盘菜单“录制屏幕”或使用快捷键 `Ctrl+F1`，框选区域后点击开始。
-3.  **截图**：点击托盘菜单“区域截图”，框选完成后自动进入编辑器。
-4.  **设置**：在主界面或托盘菜单中进入设置，调节画质、音频源及快捷键。
-
-常用快捷键：
-
-- `Ctrl+F1`：开始录制
-- `Ctrl+F2`：暂停/继续录制
-- `Ctrl+F3`：停止录制
-- `Ctrl+L`：呼出主菜单
-- 支持用户自定义快捷键，适应个人习惯。
-
-## 6. 字幕生成（WhisperX）下载说明
-
-- 默认分发 **CPU 版安装包**，所有机器都可生成字幕（速度取决于 CPU 性能）。
-- 若电脑具备 NVIDIA GPU 且希望加速字幕生成，请下载 **GPU 版安装包**（单独提供下载地址）。
-- WhisperX 本地模型不随安装包分发：首次使用可能会自动下载模型文件；也可以将模型放入 `models/whisperx/whisper` 以离线使用。
-- 相关说明见仓库文档：docs/gpu_subtitle_setup.md
 
 ---
 *LuScreen Team*
