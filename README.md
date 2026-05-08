@@ -99,6 +99,14 @@ English Summary:
 - Redistributions (including network use): if you modify or redistribute, you must keep the same license and provide complete corresponding source.
 - Enterprises/organizations for closed-source commercial use: if you cannot or do not want to comply with AGPL obligations, please obtain a commercial license (see [LICENSE](LICENSE) and [COMMERCIAL_LICENSE](COMMERCIAL_LICENSE)).
 
+## 7. 下载入口 / 官网 / 交流群
+
+- **官网下载**：访问官网 `https://luscreen.com` 获取最新版本与下载入口
+- **项目仓库**：GitHub 仓库用于查看源码、更新说明与文档
+- **问题反馈**：报 bug 请附上 `logs` 文件夹中的日志文件与问题截图，发送至 `76697742@qq.com`
+- **微信交流群**：`wuhui8118`
+- **适合人群**：适合教育培训、办公协作、Bug 反馈、内容创作与游戏精彩时刻记录
+
 ---
 *LuScreen Team*
 *让每一次分享都清晰可见。*
