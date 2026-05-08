@@ -5,20 +5,6 @@
 报bug请把logs文件夹里面的log文件和截图描述发到76697742@qq.com
 微信交流群：wuhui8118
 
-## License
-
-中文（摘要）：
-
-- 个人用户：可免费使用、修改与分发本仓库源代码。
-- 二次分发：如你修改或再发布（含网络提供服务），必须继续以相同许可证开源并保留版权与许可证声明。
-- 企业/组织闭源商用：如无法或不希望遵守 AGPL 的开源义务，请购买商业授权（见 [LICENSE](LICENSE) 与 [COMMERCIAL_LICENSE](COMMERCIAL_LICENSE)）。
-
-English (Summary):
-
-- Personal users: free to use, modify, and redistribute the source code.
-- Redistributions (including network use): if you modify or redistribute, you must keep the same license and provide complete corresponding source.
-- Enterprises/organizations for closed-source commercial use: if you cannot or do not want to comply with AGPL obligations, please obtain a commercial license (see [LICENSE](LICENSE) and [COMMERCIAL_LICENSE](COMMERCIAL_LICENSE)).
-
 ## 1. 产品概述 (Product Overview)
 
 LuScreen 是一款专为 Windows 平台打造的**高性能、全功能屏幕创作工具**。它不仅支持高帧率录屏和长截图，更创新性地引入了**手绘风格标注**，让技术文档和演示视频充满温度。无论是软件演示、Bug 汇报、教学课件制作，还是日常灵感捕捉，LuScreen 都能提供流畅、专业的体验。
@@ -65,12 +51,6 @@ LuScreen 是一款专为 Windows 平台打造的**高性能、全功能屏幕创
 *   **智能剪贴板历史**：自动保存复制过的文字与图片，方便回看和复用。
 *   **搜索与一键粘贴**：支持历史回溯、关键词查找与快速粘贴，适合高频跨应用复制场景。
 *   **本地优先的数据安全**：剪贴板历史仅保存在本地电脑，兼顾效率与隐私。
-*   **全局快捷键支持**：
-    *   `Ctrl+F1`：开始录制
-    *   `Ctrl+F2`：暂停/继续录制
-    *   `Ctrl+F3`：停止录制
-    *   `Ctrl+L`：呼出主菜单
-    *   支持用户自定义快捷键，适应个人习惯。
 
 ## 3. 技术参数与性能 (Specs)
 *   **操作系统**：Windows 10 / 11 (64-bit)
@@ -86,11 +66,31 @@ LuScreen 采用 **Freemium (免费增值)** 模式：
 *   **免费版**：包含基础录屏（1080p/30fps）、截图、基础标注功能。
 *   **专业版**：解锁2k 4K/60fps 录制，GPU 硬件加速编码等高级功能。
 
+许可证摘要：
+
+- 个人用户：可免费使用、修改与分发本仓库源代码。
+- 二次分发：如你修改或再发布（含网络提供服务），必须继续以相同许可证开源并保留版权与许可证声明。
+- 企业/组织闭源商用：如无法或不希望遵守 AGPL 的开源义务，请购买商业授权（见 [LICENSE](LICENSE) 与 [COMMERCIAL_LICENSE](COMMERCIAL_LICENSE)）。
+
+English Summary:
+
+- Personal users: free to use, modify, and redistribute the source code.
+- Redistributions (including network use): if you modify or redistribute, you must keep the same license and provide complete corresponding source.
+- Enterprises/organizations for closed-source commercial use: if you cannot or do not want to comply with AGPL obligations, please obtain a commercial license (see [LICENSE](LICENSE) and [COMMERCIAL_LICENSE](COMMERCIAL_LICENSE)).
+
 ## 5. 快速上手指南 (Quick Start)
 1.  **启动**：双击桌面图标或右下角托盘图标。
 2.  **录屏**：点击托盘菜单“录制屏幕”或使用快捷键 `Ctrl+F1`，框选区域后点击开始。
 3.  **截图**：点击托盘菜单“区域截图”，框选完成后自动进入编辑器。
 4.  **设置**：在主界面或托盘菜单中进入设置，调节画质、音频源及快捷键。
+
+常用快捷键：
+
+- `Ctrl+F1`：开始录制
+- `Ctrl+F2`：暂停/继续录制
+- `Ctrl+F3`：停止录制
+- `Ctrl+L`：呼出主菜单
+- 支持用户自定义快捷键，适应个人习惯。
 
 ## 6. 字幕生成（WhisperX）下载说明
 
