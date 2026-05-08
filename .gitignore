@@ -71,6 +71,43 @@ Desktop.ini
 .env
 .env.local
 config.json
+teleprompter_config.json
+
+# Local Python caches tracked by mistake
+src/__pycache__/
+
+# Build / release scripts and packaging descriptors
+build.spec
+build_and_pack.bat
+build_and_pack_debug.bat
+build_nuitka.bat
+make_release.bat
+pack_subtitle_runtime.bat
+rebuild_core.bat
+installer.iss
+installer_full.iss
+png2ico.py
+src/run_test.bat
+src/test_export_logic.py
+
+# Build / release notes and one-off packaging guides
+BUILD_FULL_GUIDE.md
+CREATE_SUBTITLE_RUNTIME.md
+DUAL_VERSION_RELEASE.md
+FINAL_SUMMARY.md
+INNOSETUP_INSTALL.md
+INSTALL_NEXT_STEPS.md
+PACKAGING_COMPLETE.md
+README_INSTALLER.md
+RUNTIME_DOWNLOAD_SOLUTION.md
+SETUP_COMPLETE.md
+SUBTITLE_RUNTIME_SOLUTION.md
+UPLOAD_GUIDE.md
+docs/installer_guide.md
+docs/release_strategy.md
+
+# Misc local leftovers
+echo
 
 # Secrets (Do NOT commit)
 tools/private_key.pem
