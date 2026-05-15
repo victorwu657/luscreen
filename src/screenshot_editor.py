@@ -585,7 +585,8 @@ class PropertiesPanel(QWidget):
                     if not isinstance(old_font, QFont): old_font = QFont()
                     
                     new_font = QFont(parent.hand_drawn_font_family)
-                    new_font.setPointSize(old_font.pointSize())
+                    size = old_font.pointSize()
+                    new_font.setPointSize(size if size > 0 else 9)
                     new_font.setBold(old_font.bold())
                     new_font.setItalic(old_font.italic())
                     
@@ -1857,6 +1858,7 @@ class ScreenshotEditor(QWidget):
         self.pen_width = width
 
     def set_font_size(self, size):
+        size = int(size) if int(size) > 0 else 9
         self.font_size = size
         if hasattr(self, 'active_text_editor') and self.active_text_editor:
              font = self.active_text_editor.font()
@@ -1870,12 +1872,13 @@ class ScreenshotEditor(QWidget):
         item = self.items[self.selected_item_index]
         
         if key == 'font_size':
+            size_val = int(value) if int(value) > 0 else 9
             if 'font' in item:
                 font = QFont(item['font'])
-                font.setPointSize(int(value))
+                font.setPointSize(size_val)
                 item['font'] = font
             else:
-                item['font_size'] = int(value)
+                item['font_size'] = size_val
         elif key == 'font':
             item['font'] = value
             if hasattr(value, 'pointSize'):

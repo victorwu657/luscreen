@@ -2,6 +2,7 @@ import sys
 import os
 import subprocess
 import threading
+import time
 from datetime import datetime
 
 if "--subtitle-service" in sys.argv:
@@ -237,6 +238,7 @@ class LuScreenApp:
         self.editors = [] # Keep track of open image editors
         self._stop_poll_timer = None
         self._stopping_recorder = None
+        self._tray_activation_guard_until = 0.0
         
         # 主程序窗口
         self.main_window = MainWindow()
@@ -498,9 +500,47 @@ class LuScreenApp:
                 self.stop_recording()
 
     def on_tray_activated(self, reason):
+        now = time.monotonic()
+        reason_map = {
+            QSystemTrayIcon.Unknown: "Unknown",
+            QSystemTrayIcon.Context: "Context",
+            QSystemTrayIcon.DoubleClick: "DoubleClick",
+            QSystemTrayIcon.Trigger: "Trigger",
+            QSystemTrayIcon.MiddleClick: "MiddleClick",
+        }
+        reason_name = reason_map.get(
+            reason,
+            getattr(reason, "name", str(reason)),
+        )
+        logger.info(
+            "Tray activated reason=%s main_window_visible=%s active=%s editors=%s stopping_recorder=%s",
+            reason_name,
+            self.main_window.isVisible() if self.main_window else None,
+            self.main_window.isActiveWindow() if self.main_window else None,
+            len(getattr(self, "editors", []) or []),
+            self._stopping_recorder is not None,
+        )
+        if reason == QSystemTrayIcon.Context:
+            logger.info("Tray activation showing context menu at cursor")
+            self.tray_menu.popup(QCursor.pos())
+            return
         # Trigger (单击) 或 DoubleClick (双击) 都显示主窗口
         if reason == QSystemTrayIcon.Trigger or reason == QSystemTrayIcon.DoubleClick:
+            if now < self._tray_activation_guard_until:
+                logger.info(
+                    "Tray activation skipped by guard reason=%s remaining=%.3fs",
+                    reason_name,
+                    self._tray_activation_guard_until - now,
+                )
+                return
+            self._tray_activation_guard_until = now + 0.3
+            logger.info("Tray activation entering show_at_bottom_right")
             self.main_window.show_at_bottom_right() # 显示在右下角
+            logger.info(
+                "Tray activation finished show_at_bottom_right visible=%s active=%s",
+                self.main_window.isVisible() if self.main_window else None,
+                self.main_window.isActiveWindow() if self.main_window else None,
+            )
             # 考虑到用户习惯，点击托盘通常希望看到界面
 
     def open_image_editor(self):
@@ -583,8 +623,7 @@ class LuScreenApp:
 
     def close_camera(self):
         if self.camera_widget:
-            self.camera_widget.close()
-            self.camera_widget = None
+            self._close_widget_on_ui("camera_widget")
             print("Camera closed")
 
     def get_device_name(self, index, type_):
@@ -1372,18 +1411,9 @@ class LuScreenApp:
             getattr(rec, "final_output", None),
         )
 
-        if self.control_bar:
-            self.control_bar.setEnabled(False)
-            self.control_bar.close()
-            self.control_bar = None
-
-        if self.recording_frame:
-            self.recording_frame.close()
-            self.recording_frame = None
-
-        if self.mouse_effect:
-            self.mouse_effect.close()
-            self.mouse_effect = None
+        self._close_widget_on_ui("control_bar", disable_before_close=True)
+        self._close_widget_on_ui("recording_frame")
+        self._close_widget_on_ui("mouse_effect")
 
         # 停止录制时关闭摄像头
         self.close_camera()
@@ -1410,6 +1440,29 @@ class LuScreenApp:
             self._stop_poll_timer.timeout.connect(self._poll_stop_recording_complete)
         self._stop_poll_timer.start()
         logger.info("Started polling for recorder shutdown")
+
+    def _close_widget_on_ui(self, attr_name, *, disable_before_close=False):
+        widget = getattr(self, attr_name, None)
+        if widget is None:
+            return
+        try:
+            logger.info(
+                "Closing %s on thread=%s visible=%s active=%s class=%s",
+                attr_name,
+                threading.current_thread().name,
+                widget.isVisible() if hasattr(widget, "isVisible") else None,
+                widget.isActiveWindow() if hasattr(widget, "isActiveWindow") else None,
+                type(widget).__name__,
+            )
+            if disable_before_close and hasattr(widget, "setEnabled"):
+                widget.setEnabled(False)
+            widget.close()
+            if hasattr(widget, "deleteLater"):
+                widget.deleteLater()
+        except Exception:
+            logger.exception("Failed to close widget attr=%s", attr_name)
+        finally:
+            setattr(self, attr_name, None)
 
     def _poll_stop_recording_complete(self):
         rec = self._stopping_recorder
@@ -1446,6 +1499,13 @@ class LuScreenApp:
                 editor = VideoEditor(video_path, mic_path, sys_path, meta_path, output_path)
                 self.editors.append(editor)
                 editor.show()
+                logger.info(
+                    "Video editor show requested visible=%s active=%s path=%s open_editors=%s",
+                    editor.isVisible(),
+                    editor.isActiveWindow(),
+                    video_path,
+                    len(self.editors),
+                )
 
                 # Cleanup closed editors
                 self.editors = [e for e in self.editors if e.isVisible()]
@@ -1462,29 +1522,25 @@ class LuScreenApp:
         if self.recorder is not None:
             QMessageBox.warning(None, "提示", "正在录制中，请先停止录制！")
             return
+        if self._stopping_recorder is not None:
+            QMessageBox.warning(None, "提示", "录制正在停止并收尾，请稍候再退出！")
+            return
             
         # Explicitly close all widgets to ensure threads are stopped
         try:
-            if self.camera_widget:
-                self.camera_widget.close()
-                self.camera_widget = None
-                
-            if self.selection_widget:
-                self.selection_widget.close()
-                self.selection_widget = None
-                
-            if self.control_bar:
-                self.control_bar.close()
-                self.control_bar = None
-                
-            if self.mouse_effect:
-                self.mouse_effect.close()
-                self.mouse_effect = None
+            self._close_widget_on_ui("camera_widget")
+            self._close_widget_on_ui("selection_widget")
+            self._close_widget_on_ui("control_bar")
+            self._close_widget_on_ui("mouse_effect")
                 
             if hasattr(self, 'editors'):
                 for editor in self.editors:
-                    try: editor.close()
-                    except: pass
+                    try:
+                        logger.info("Closing editor during quit visible=%s active=%s", editor.isVisible(), editor.isActiveWindow())
+                        editor.close()
+                        editor.deleteLater()
+                    except Exception:
+                        logger.exception("Failed to close editor during quit")
                 self.editors = []
                 
         except Exception as e:

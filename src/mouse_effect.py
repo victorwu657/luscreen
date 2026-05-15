@@ -2,6 +2,10 @@ from PySide6.QtWidgets import QWidget, QApplication
 from PySide6.QtCore import Qt, QTimer, QPoint
 from PySide6.QtGui import QPainter, QColor, QCursor
 import pynput.mouse
+import logging
+import threading
+
+logger = logging.getLogger("MouseEffect")
 
 class Ripple:
     def __init__(self, pos, color=QColor(255, 0, 0, 150)):
@@ -120,6 +124,18 @@ class MouseEffectWidget(QWidget):
             r.draw(painter)
 
     def closeEvent(self, event):
+        logger.info(
+            "MouseEffect closeEvent thread=%s timer_active=%s listener_alive=%s visible=%s",
+            threading.current_thread().name,
+            self.timer.isActive() if hasattr(self, "timer") else None,
+            self.listener.is_alive() if getattr(self, "listener", None) else None,
+            self.isVisible(),
+        )
+        try:
+            if hasattr(self, "timer") and self.timer.isActive():
+                self.timer.stop()
+        except Exception:
+            logger.exception("MouseEffect timer stop failed during closeEvent")
         if self.listener:
             self.listener.stop()
         super().closeEvent(event)

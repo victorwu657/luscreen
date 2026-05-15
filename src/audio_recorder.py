@@ -143,8 +143,7 @@ class AudioRecorder(threading.Thread):
                         rate=48000, 
                         input_device=target_device_index, 
                         input_channels=self.channels, 
-                        input_format=self.format,
-                        input_parameters=None
+                        input_format=self.format
                     )
                     if is_supported:
                         self.rate = 48000

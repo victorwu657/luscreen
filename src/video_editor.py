@@ -509,6 +509,155 @@ class ExportThread(QThread):
         except Exception:
             return False
 
+    def _append_audio_timeline_log(self, stage: str, **fields):
+        try:
+            base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            logs_dir = os.path.join(base, "logs")
+            os.makedirs(logs_dir, exist_ok=True)
+            log_path = os.path.join(logs_dir, "export_audio_timeline.log")
+            with open(log_path, "a", encoding="utf-8") as lf:
+                lf.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] stage={stage}\n")
+                for key, value in fields.items():
+                    lf.write(f"{key}={value}\n")
+                lf.write("----\n")
+        except Exception:
+            pass
+
+    def _build_audio_timeline_with_rust(self, source_audio_path: str, work_dir: str, segments, audio_cut_scale: float = 1.0):
+        try:
+            rust_core = VideoProcessor._load_rust_core(
+                required_attrs=("AudioTimelineBuilder",),
+                context="video_editor_audio_timeline",
+            )
+        except ImportError as exc:
+            self.export_logger.info(f"[ExportAudio] rust 音频时间线不可用，回退 FFmpeg: {exc}")
+            self._append_audio_timeline_log("rust_unavailable", source=source_audio_path, reason=str(exc))
+            return None
+
+        builder_cls = getattr(rust_core, "AudioTimelineBuilder", None)
+        if builder_cls is None:
+            self._append_audio_timeline_log("rust_missing_attr", source=source_audio_path)
+            return None
+
+        segments_ms = []
+        segments_samples = []
+        try:
+            with wave.open(source_audio_path, "rb") as wf:
+                sample_rate = int(wf.getframerate() or 0)
+            if sample_rate <= 0:
+                raise Exception("源 WAV 采样率无效")
+            for seg in segments:
+                start_ms = float(seg.get("source_start", 0) or 0.0)
+                end_ms = float(seg.get("source_end", 0) or 0.0)
+                if audio_cut_scale != 1.0:
+                    start_ms = float(start_ms) * float(audio_cut_scale)
+                    end_ms = float(end_ms) * float(audio_cut_scale)
+                start_ms = max(0.0, start_ms)
+                end_ms = max(start_ms, end_ms)
+                segments_ms.append((start_ms, end_ms))
+                start_sample = int(round((start_ms / 1000.0) * float(sample_rate)))
+                end_sample = int(round((end_ms / 1000.0) * float(sample_rate)))
+                segments_samples.append((max(0, start_sample), max(max(0, start_sample), end_sample)))
+        except Exception as exc:
+            self._append_audio_timeline_log("rust_segments_invalid", source=source_audio_path, reason=str(exc))
+            return None
+
+        merged_audio = os.path.join(work_dir, "merged_audio.wav")
+        started = time.perf_counter()
+        try:
+            stats = builder_cls.build_wav_timeline_from_samples(source_audio_path, merged_audio, segments_samples)
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            self.temp_files.append(merged_audio)
+            self._ensure_file(merged_audio, 1024, "合并音频")
+            if not self._validate_wav_file(merged_audio):
+                raise Exception(f"合并音频无效: {merged_audio}")
+            self.export_logger.info(
+                "[ExportAudio] Rust 音频时间线成功: segments=%s elapsed_ms=%.2f stats=%s",
+                len(segments_ms),
+                elapsed_ms,
+                stats,
+            )
+            self._append_audio_timeline_log(
+                "rust_success",
+                source=source_audio_path,
+                output=merged_audio,
+                segments=len(segments_ms),
+                elapsed_ms=f"{elapsed_ms:.2f}",
+                sample_rate=sample_rate,
+                audio_cut_scale=f"{audio_cut_scale:.9f}",
+                stats=stats,
+            )
+            return merged_audio
+        except Exception as exc:
+            self.export_logger.warning(f"[ExportAudio] Rust 音频时间线失败，回退 FFmpeg: {exc}")
+            self._append_audio_timeline_log(
+                "rust_failed",
+                source=source_audio_path,
+                output=merged_audio,
+                segments=len(segments_ms),
+                reason=str(exc),
+            )
+            try:
+                if os.path.exists(merged_audio):
+                    os.remove(merged_audio)
+            except Exception:
+                pass
+            return None
+
+    def _build_audio_timeline_with_ffmpeg(self, ffmpeg_exe: str, startupinfo, source_audio_path: str, work_dir: str, segments, audio_cut_scale: float = 1.0):
+        audio_parts = []
+        audio_list_path = os.path.join(work_dir, "audio_list.txt")
+        for i, seg in enumerate(segments):
+            if self.is_cancelled:
+                raise Exception("Export canceled")
+            start_sec = seg['source_start'] / 1000.0
+            end_sec = seg['source_end'] / 1000.0
+            if audio_cut_scale != 1.0:
+                start_sec = float(start_sec) * float(audio_cut_scale)
+                end_sec = float(end_sec) * float(audio_cut_scale)
+            dur_sec = max(0.0, end_sec - start_sec)
+            part_audio = os.path.join(work_dir, f"aud_{i}.wav")
+            cmd_aud_cut = [
+                ffmpeg_exe, '-y',
+                '-ss', str(start_sec), '-to', str(end_sec),
+                '-i', source_audio_path,
+                '-vn', '-ac', '1', '-ar', '44100', '-c:a', 'pcm_s16le',
+                part_audio
+            ]
+            rc, _, err = self._run_cmd(cmd_aud_cut, startupinfo=startupinfo)
+            if rc != 0 or (not os.path.exists(part_audio)) or os.path.getsize(part_audio) < 1024:
+                cmd_silence = [
+                    ffmpeg_exe, '-y',
+                    '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono',
+                    '-t', str(dur_sec),
+                    '-c:a', 'pcm_s16le',
+                    part_audio
+                ]
+                rc2, _, err2 = self._run_cmd(cmd_silence, startupinfo=startupinfo)
+                if rc2 != 0:
+                    raise Exception(
+                        f"音频切片失败: {(err or b'').decode('utf-8', errors='ignore')}\n"
+                        f"{(err2 or b'').decode('utf-8', errors='ignore')}"
+                    )
+            audio_parts.append(part_audio)
+            self.temp_files.append(part_audio)
+        with open(audio_list_path, "w", encoding="utf-8") as f:
+            for part in audio_parts:
+                safe_path = part.replace("\\", "/").replace("'", "'\\''")
+                f.write(f"file '{safe_path}'\n")
+        self.temp_files.append(audio_list_path)
+        merged_audio = os.path.join(work_dir, "merged_audio.wav")
+        cmd_aud_concat = [ffmpeg_exe, '-y', '-f', 'concat', '-safe', '0', '-i', audio_list_path, '-c', 'copy', merged_audio]
+        rc, _, err = self._run_cmd(cmd_aud_concat, startupinfo=startupinfo)
+        if rc != 0:
+            raise Exception(f"合并音频失败: {(err or b'').decode('utf-8', errors='ignore')}")
+        self.temp_files.append(merged_audio)
+        self._ensure_file(merged_audio, 1024, "合并音频")
+        if not self._validate_wav_file(merged_audio):
+            raise Exception(f"合并音频无效: {merged_audio}")
+        self._append_audio_timeline_log("ffmpeg_fallback_success", source=source_audio_path, output=merged_audio, segments=len(segments))
+        return merged_audio
+
     def _ass_time(self, seconds: float) -> str:
         try:
             total_cs = int(round(float(seconds) * 100.0))
@@ -858,19 +1007,20 @@ class ExportThread(QThread):
 
                 video_parts = []
                 failed = False
+                merged_video = os.path.join(work_dir, "merged_video_only.mp4")
 
-                for i, seg in enumerate(segments):
-                    if self.is_cancelled:
-                        raise Exception("Export canceled")
+                if use_stream_copy:
+                    for i, seg in enumerate(segments):
+                        if self.is_cancelled:
+                            raise Exception("Export canceled")
 
-                    seg_progress_base = 20 + (i / max(1, total_segments)) * 60
-                    self.progress_updated.emit(int(seg_progress_base), f"正在处理视频片段 {i+1}/{total_segments}...")
+                        seg_progress_base = 20 + (i / max(1, total_segments)) * 60
+                        self.progress_updated.emit(int(seg_progress_base), f"正在处理视频片段 {i+1}/{total_segments}...")
 
-                    temp_video_part = os.path.join(work_dir, f"part_{i}.mp4")
-                    start_sec = seg['source_start'] / 1000.0
-                    end_sec = seg['source_end'] / 1000.0
+                        temp_video_part = os.path.join(work_dir, f"part_{i}.mp4")
+                        start_sec = seg['source_start'] / 1000.0
+                        end_sec = seg['source_end'] / 1000.0
 
-                    if use_stream_copy:
                         cmd_cut = [
                             ffmpeg_exe,
                             '-y',
@@ -886,82 +1036,89 @@ class ExportThread(QThread):
                             last_err = (err or b'').decode('utf-8', errors='ignore')
                             failed = True
                             break
-                    else:
-                        vp = VideoProcessor(
-                            input_path=self.params['video_path'],
-                            metadata_path=self.params['metadata_path'],
-                            output_path=temp_video_part,
-                            base_zoom=self.params['base_zoom'],
-                            click_zoom=self.params['click_zoom'],
-                            fps=self.params['target_fps'],
-                            start_time=start_sec,
-                            end_time=end_sec,
-                            click_duration=self.params['click_duration'],
-                            watermark_text=self.params['watermark_text'],
-                            watermark_pos=self.params['watermark_pos'],
-                            watermark_pos_x=self.params.get('watermark_pos_x'),
-                            watermark_pos_y=self.params.get('watermark_pos_y'),
-                            watermark_size=self.params['watermark_size'],
-                            watermark_use_image=bool(self.params.get('watermark_use_image')),
-                            watermark_image_path=self.params.get('watermark_image_path'),
-                            target_resolution=(self.params['target_w'], self.params['target_h']),
-                            use_gpu=self.params['use_gpu'],
-                            background_path=self.params['background_image_path'],
-                            bg_padding_ratio=self.params['bg_padding'] / max(1, self.params['canvas_width']) if self.params['bg_padding'] > 0 else 0.0,
-                            video_corner_radius_ratio=self.params['video_corner_radius'] / max(1, self.params['canvas_width']) if self.params['video_corner_radius'] > 0 else 0.0
-                        )
 
-                        def update_prog(p):
-                            if self.is_cancelled:
-                                return
-                            current_prog = seg_progress_base + p * (60 / max(1, total_segments))
-                            self.progress_updated.emit(int(current_prog), f"正在处理视频片段 {i+1}/{total_segments}...")
+                        try:
+                            self._ensure_file(temp_video_part, 50 * 1024, "视频片段")
+                            if not self._validate_video_file(temp_video_part):
+                                raise Exception(f"视频片段无效: {temp_video_part}")
+                        except Exception as e:
+                            last_err = str(e)
+                            failed = True
+                            break
 
-                        if not vp.process(progress_callback=update_prog):
-                            if self.params.get('use_gpu'):
-                                vp.use_gpu = False
-                                if not vp.process(progress_callback=update_prog):
-                                    last_err = f"Failed to process segment {i}"
-                                    failed = True
-                                    break
-                            else:
-                                last_err = f"Failed to process segment {i}"
+                        video_parts.append(temp_video_part)
+                        self.temp_files.append(temp_video_part)
+
+                    if failed:
+                        if False in attempts:
+                            continue
+                        raise Exception(last_err or "Export failed")
+
+                    self.progress_updated.emit(80, "正在合并视频...")
+                    list_file_path = os.path.join(work_dir, "list.txt")
+                    with open(list_file_path, "w", encoding="utf-8") as f:
+                        for part in video_parts:
+                            safe_path = part.replace("\\", "/").replace("'", "'\\''")
+                            f.write(f"file '{safe_path}'\n")
+                    self.temp_files.append(list_file_path)
+
+                    cmd_concat = [ffmpeg_exe, '-y', '-f', 'concat', '-safe', '0', '-i', list_file_path, '-c', 'copy', merged_video]
+                    rc, _, err = self._run_cmd(cmd_concat, startupinfo=startupinfo)
+                    if rc != 0:
+                        last_err = (err or b'').decode('utf-8', errors='ignore')
+                        if False in attempts:
+                            continue
+                        raise Exception(f"合并视频失败: {last_err}")
+                else:
+                    self.progress_updated.emit(20, f"正在处理视频片段 1/{total_segments}...")
+                    vp = VideoProcessor(
+                        input_path=self.params['video_path'],
+                        metadata_path=self.params['metadata_path'],
+                        output_path=merged_video,
+                        base_zoom=self.params['base_zoom'],
+                        click_zoom=self.params['click_zoom'],
+                        fps=self.params['target_fps'],
+                        click_duration=self.params['click_duration'],
+                        watermark_text=self.params['watermark_text'],
+                        watermark_pos=self.params['watermark_pos'],
+                        watermark_pos_x=self.params.get('watermark_pos_x'),
+                        watermark_pos_y=self.params.get('watermark_pos_y'),
+                        watermark_size=self.params['watermark_size'],
+                        watermark_use_image=bool(self.params.get('watermark_use_image')),
+                        watermark_image_path=self.params.get('watermark_image_path'),
+                        target_resolution=(self.params['target_w'], self.params['target_h']),
+                        use_gpu=self.params['use_gpu'],
+                        background_path=self.params['background_image_path'],
+                        bg_padding_ratio=self.params['bg_padding'] / max(1, self.params['canvas_width']) if self.params['bg_padding'] > 0 else 0.0,
+                        video_corner_radius_ratio=self.params['video_corner_radius'] / max(1, self.params['canvas_width']) if self.params['video_corner_radius'] > 0 else 0.0,
+                        segments=[(seg['source_start'] / 1000.0, seg['source_end'] / 1000.0) for seg in segments],
+                        merge_source_audio=False,
+                        cancel_check=lambda: self.is_cancelled,
+                    )
+
+                    def update_prog(p):
+                        if self.is_cancelled:
+                            return
+                        current_prog = 20 + p * 60
+                        self.progress_updated.emit(int(current_prog), f"正在处理视频片段 1/{total_segments}...")
+
+                    if not vp.process(progress_callback=update_prog):
+                        if self.is_cancelled:
+                            raise Exception("Export canceled")
+                        if self.params.get('use_gpu'):
+                            vp.use_gpu = False
+                            if not vp.process(progress_callback=update_prog):
+                                if self.is_cancelled:
+                                    raise Exception("Export canceled")
+                                last_err = "Failed to process export session"
                                 failed = True
-                                break
+                        else:
+                            last_err = "Failed to process export session"
+                            failed = True
 
-                    try:
-                        self._ensure_file(temp_video_part, 50 * 1024, "视频片段")
-                        if not self._validate_video_file(temp_video_part):
-                            raise Exception(f"视频片段无效: {temp_video_part}")
-                    except Exception as e:
-                        last_err = str(e)
-                        failed = True
-                        break
+                    if failed:
+                        raise Exception(last_err or "Export failed")
 
-                    video_parts.append(temp_video_part)
-                    self.temp_files.append(temp_video_part)
-
-                if failed:
-                    if use_stream_copy and (False in attempts):
-                        continue
-                    raise Exception(last_err or "Export failed")
-
-                self.progress_updated.emit(80, "正在合并视频...")
-                list_file_path = os.path.join(work_dir, "list.txt")
-                with open(list_file_path, "w", encoding="utf-8") as f:
-                    for part in video_parts:
-                        safe_path = part.replace("\\", "/").replace("'", "'\\''")
-                        f.write(f"file '{safe_path}'\n")
-                self.temp_files.append(list_file_path)
-
-                merged_video = os.path.join(work_dir, "merged_video_only.mp4")
-                cmd_concat = [ffmpeg_exe, '-y', '-f', 'concat', '-safe', '0', '-i', list_file_path, '-c', 'copy', merged_video]
-                rc, _, err = self._run_cmd(cmd_concat, startupinfo=startupinfo)
-                if rc != 0:
-                    last_err = (err or b'').decode('utf-8', errors='ignore')
-                    if use_stream_copy and (False in attempts):
-                        continue
-                    raise Exception(f"合并视频失败: {last_err}")
                 self.temp_files.append(merged_video)
                 try:
                     self._ensure_file(merged_video, 100 * 1024, "合并视频")
@@ -976,54 +1133,21 @@ class ExportThread(QThread):
                 final_audio_path = None
                 if audio_source_path:
                     self.progress_updated.emit(85, "正在裁剪并拼接音频...")
-                    audio_parts = []
-                    audio_list_path = os.path.join(work_dir, "audio_list.txt")
-                    for i, seg in enumerate(segments):
-                        if self.is_cancelled:
-                            raise Exception("Export canceled")
-                        start_sec = seg['source_start'] / 1000.0
-                        end_sec = seg['source_end'] / 1000.0
-                        if audio_cut_scale != 1.0:
-                            start_sec = float(start_sec) * float(audio_cut_scale)
-                            end_sec = float(end_sec) * float(audio_cut_scale)
-                        dur_sec = max(0.0, end_sec - start_sec)
-                        part_audio = os.path.join(work_dir, f"aud_{i}.wav")
-                        cmd_aud_cut = [
-                            ffmpeg_exe, '-y',
-                            '-ss', str(start_sec), '-to', str(end_sec),
-                            '-i', audio_source_path,
-                            '-vn', '-ac', '1', '-ar', '44100', '-c:a', 'pcm_s16le',
-                            part_audio
-                        ]
-                        rc, _, err = self._run_cmd(cmd_aud_cut, startupinfo=startupinfo)
-                        if rc != 0 or (not os.path.exists(part_audio)) or os.path.getsize(part_audio) < 1024:
-                            cmd_silence = [
-                                ffmpeg_exe, '-y',
-                                '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono',
-                                '-t', str(dur_sec),
-                                '-c:a', 'pcm_s16le',
-                                part_audio
-                            ]
-                            rc2, _, err2 = self._run_cmd(cmd_silence, startupinfo=startupinfo)
-                            if rc2 != 0:
-                                raise Exception(f"音频切片失败: {(err or b'').decode('utf-8', errors='ignore')}\n{(err2 or b'').decode('utf-8', errors='ignore')}")
-                        audio_parts.append(part_audio)
-                        self.temp_files.append(part_audio)
-                    with open(audio_list_path, "w", encoding="utf-8") as f:
-                        for part in audio_parts:
-                            safe_path = part.replace("\\", "/").replace("'", "'\\''")
-                            f.write(f"file '{safe_path}'\n")
-                    self.temp_files.append(audio_list_path)
-                    merged_audio = os.path.join(work_dir, "merged_audio.wav")
-                    cmd_aud_concat = [ffmpeg_exe, '-y', '-f', 'concat', '-safe', '0', '-i', audio_list_path, '-c', 'copy', merged_audio]
-                    rc, _, err = self._run_cmd(cmd_aud_concat, startupinfo=startupinfo)
-                    if rc != 0:
-                        raise Exception(f"合并音频失败: {(err or b'').decode('utf-8', errors='ignore')}")
-                    self.temp_files.append(merged_audio)
-                    self._ensure_file(merged_audio, 1024, "合并音频")
-                    if not self._validate_wav_file(merged_audio):
-                        raise Exception(f"合并音频无效: {merged_audio}")
-                    final_audio_path = merged_audio
+                    final_audio_path = self._build_audio_timeline_with_rust(
+                        audio_source_path,
+                        work_dir,
+                        segments,
+                        audio_cut_scale=audio_cut_scale,
+                    )
+                    if not final_audio_path:
+                        final_audio_path = self._build_audio_timeline_with_ffmpeg(
+                            ffmpeg_exe,
+                            startupinfo,
+                            audio_source_path,
+                            work_dir,
+                            segments,
+                            audio_cut_scale=audio_cut_scale,
+                        )
                 elif not use_stream_copy:
                     self.progress_updated.emit(85, "正在提取并裁剪原视频音频...")
                     extracted_audio = os.path.join(work_dir, "extracted_video_audio.wav")
@@ -1036,47 +1160,21 @@ class ExportThread(QThread):
                     rc, _, err = self._run_cmd(cmd_extract, startupinfo=startupinfo)
                     if rc == 0 and os.path.exists(extracted_audio) and os.path.getsize(extracted_audio) > 0:
                         self.temp_files.append(extracted_audio)
-                        audio_parts = []
-                        audio_list_path = os.path.join(work_dir, "audio_list.txt")
-                        for i, seg in enumerate(segments):
-                            if self.is_cancelled:
-                                raise Exception("Export canceled")
-                            start_sec = seg['source_start'] / 1000.0
-                            end_sec = seg['source_end'] / 1000.0
-                            dur_sec = max(0.0, end_sec - start_sec)
-                            part_audio = os.path.join(work_dir, f"aud_{i}.wav")
-                            cmd_aud_cut = [
-                                ffmpeg_exe, '-y',
-                                '-ss', str(start_sec), '-to', str(end_sec),
-                                '-i', extracted_audio,
-                                '-vn', '-ac', '1', '-ar', '44100', '-c:a', 'pcm_s16le',
-                                part_audio
-                            ]
-                            rc, _, err2 = self._run_cmd(cmd_aud_cut, startupinfo=startupinfo)
-                            if rc != 0 or (not os.path.exists(part_audio)) or os.path.getsize(part_audio) < 1024:
-                                cmd_silence = [
-                                    ffmpeg_exe, '-y',
-                                    '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono',
-                                    '-t', str(dur_sec),
-                                    '-c:a', 'pcm_s16le',
-                                    part_audio
-                                ]
-                                rc3, _, err3 = self._run_cmd(cmd_silence, startupinfo=startupinfo)
-                                if rc3 != 0:
-                                    raise Exception(f"音频切片失败: {(err2 or b'').decode('utf-8', errors='ignore')}\n{(err3 or b'').decode('utf-8', errors='ignore')}")
-                            audio_parts.append(part_audio)
-                            self.temp_files.append(part_audio)
-                        with open(audio_list_path, "w", encoding="utf-8") as f:
-                            for part in audio_parts:
-                                safe_path = part.replace("\\", "/").replace("'", "'\\''")
-                                f.write(f"file '{safe_path}'\n")
-                        self.temp_files.append(audio_list_path)
-                        merged_audio = os.path.join(work_dir, "merged_audio.wav")
-                        cmd_aud_concat = [ffmpeg_exe, '-y', '-f', 'concat', '-safe', '0', '-i', audio_list_path, '-c', 'copy', merged_audio]
-                        rc, _, err4 = self._run_cmd(cmd_aud_concat, startupinfo=startupinfo)
-                        if rc == 0 and os.path.exists(merged_audio) and os.path.getsize(merged_audio) > 0:
-                            self.temp_files.append(merged_audio)
-                            final_audio_path = merged_audio
+                        final_audio_path = self._build_audio_timeline_with_rust(
+                            extracted_audio,
+                            work_dir,
+                            segments,
+                            audio_cut_scale=1.0,
+                        )
+                        if not final_audio_path:
+                            final_audio_path = self._build_audio_timeline_with_ffmpeg(
+                                ffmpeg_exe,
+                                startupinfo,
+                                extracted_audio,
+                                work_dir,
+                                segments,
+                                audio_cut_scale=1.0,
+                            )
 
                 self.progress_updated.emit(90, "正在最终合成...")
                 cmd_inputs = ['-i', merged_video]
@@ -1476,6 +1574,26 @@ class VideoEditor(QWidget):
         
         self.init_ui()
         QTimer.singleShot(100, self.check_and_generate_preview)
+
+    def _log_window_state(self, tag):
+        try:
+            geom = self.geometry()
+            self.logger.info(
+                "%s | visible=%s hidden=%s active=%s minimized=%s pos=(%s,%s) size=%sx%s player=%s playback=%s",
+                tag,
+                self.isVisible(),
+                self.isHidden(),
+                self.isActiveWindow(),
+                self.isMinimized(),
+                geom.x(),
+                geom.y(),
+                geom.width(),
+                geom.height(),
+                hasattr(self, "player") and self.player is not None,
+                self.player.playbackState() if hasattr(self, "player") and self.player is not None else None,
+            )
+        except Exception:
+            self.logger.exception("VideoEditor state log failed for %s", tag)
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -3553,6 +3671,7 @@ class VideoEditor(QWidget):
         self.init_player()
 
     def closeEvent(self, event):
+        self._log_window_state("closeEvent start")
         if hasattr(self, 'player'):
             self.pause_video()
             self.player.setSource(QUrl())
@@ -3588,7 +3707,24 @@ class VideoEditor(QWidget):
         except Exception as e:
             self.logger.error(f"Error during cleanup: {e}")
 
+        self._log_window_state("closeEvent end before super")
         super().closeEvent(event)
+
+    def showEvent(self, event):
+        self._log_window_state("showEvent")
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self._log_window_state("hideEvent")
+        super().hideEvent(event)
+
+    def focusInEvent(self, event):
+        self._log_window_state("focusInEvent")
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        self._log_window_state("focusOutEvent")
+        super().focusOutEvent(event)
 
 
         

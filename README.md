@@ -75,7 +75,61 @@ LuScreen 是一款专为 Windows 平台打造的**高性能、全功能屏幕创
     *   低资源占用，录制时对系统性能影响极小。
     *   针对高 DPI 屏幕（2K/4K）进行了缩放适配，界面清晰不模糊。
 
-## 4. 快速上手指南 (Quick Start)
+## 4. 安装与启动 (Install & Run)
+
+### 环境要求
+- Windows 10 / 11 64 位
+- 建议使用 Python 3.12
+- 建议使用虚拟环境 `venv`
+
+### 1）克隆项目
+
+```powershell
+git clone https://github.com/victorwu657/luscreen.git
+cd luscreen
+```
+
+### 2）创建虚拟环境
+
+```powershell
+python -m venv .venv
+```
+
+### 3）激活虚拟环境
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+### 4）安装依赖
+
+```powershell
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### 5）启动项目
+
+```powershell
+.venv\Scripts\python.exe main.py
+```
+
+### 6）首次启动说明
+- 首次运行后，程序会在项目目录下自动创建本地配置与数据目录
+- 常见目录包括：`captures/`、`recordings/`、`logs/`
+- 若你修改过快捷键、录制参数或保存路径，配置会自动保存在本地
+
+### 可选功能说明
+- **OCR 截图识字**：随 Python 依赖安装即可使用
+- **字幕生成（WhisperX）**：依赖较大，首次使用可能自动下载模型；详细说明见 `docs/gpu_subtitle_setup.md`
+- **系统音频录制**：依赖 `soundcard`，建议在 Windows 真机环境下使用
+
+### 常见安装建议
+- 若 `pyaudio` 安装失败，优先确认当前 Python 版本与系统架构是否匹配
+- 若录屏或视频编辑异常，可检查 `logs/` 目录中的日志文件
+- 若首次启动较慢，通常是 OCR / 字幕相关依赖初始化所致
+
+## 5. 快速上手指南 (Quick Start)
 1.  **启动**：双击桌面图标或右下角托盘图标。
 2.  **录屏**：点击托盘菜单“录制屏幕”或使用快捷键 `Ctrl+F1`，框选区域后点击开始。
 3.  **截图**：点击托盘菜单“区域截图”，框选完成后自动进入编辑器。
@@ -89,14 +143,14 @@ LuScreen 是一款专为 Windows 平台打造的**高性能、全功能屏幕创
 - `Ctrl+L`：呼出主菜单
 - 支持用户自定义快捷键，适应个人习惯。
 
-## 5. 字幕生成（WhisperX）下载说明
+## 6. 字幕生成（WhisperX）下载说明
 
 - 默认分发 **CPU 版安装包**，所有机器都可生成字幕（速度取决于 CPU 性能）。
 - 若电脑具备 NVIDIA GPU 且希望加速字幕生成，请下载 **GPU 版安装包**（单独提供下载地址）。
 - WhisperX 本地模型不随安装包分发：首次使用可能会自动下载模型文件；也可以将模型放入 `models/whisperx/whisper` 以离线使用。
 - 相关说明见仓库文档：docs/gpu_subtitle_setup.md
 
-## 6. 商业授权 (Licensing)
+## 7. 商业授权 (Licensing)
 LuScreen 采用 **Freemium (免费增值)** 模式：
 *   **免费版**：包含基础录屏（1080p/30fps）、截图、基础标注功能。
 *   **专业版**：解锁2k 4K/60fps 录制，GPU 硬件加速编码等高级功能。
@@ -113,7 +167,7 @@ English Summary:
 - Redistributions (including network use): if you modify or redistribute, you must keep the same license and provide complete corresponding source.
 - Enterprises/organizations for closed-source commercial use: if you cannot or do not want to comply with AGPL obligations, please obtain a commercial license (see [LICENSE](LICENSE) and [COMMERCIAL_LICENSE](COMMERCIAL_LICENSE)).
 
-## 7. 下载入口 / 官网 / 交流群
+## 8. 下载入口 / 官网 / 交流群
 
 - **官网下载**：访问官网 `https://luscreen.com` 获取最新版本与下载入口
 - **项目仓库**：GitHub 仓库用于查看源码、更新说明与文档

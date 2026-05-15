@@ -44,6 +44,11 @@ class UpdateWorker(QThread):
                     else:
                         raise e
                         
+                if response.status_code == 404:
+                    print(f"Update server not available yet (404).")
+                    self.check_finished.emit(False, "", "")
+                    return
+                    
                 response.raise_for_status()
                 data = response.json()
                 

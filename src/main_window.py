@@ -1,7 +1,11 @@
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
                                QFrame)
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QCursor, QFont
+import logging
+import time
+
+logger = logging.getLogger("MainWindow")
 
 class MainMenuButton(QPushButton):
     def __init__(self, text, icon_text, parent=None):
@@ -58,6 +62,26 @@ class MainWindow(QWidget):
         
         # For dragging
         self.old_pos = None
+        self._bottom_right_show_in_progress = False
+        self._last_bottom_right_show_at = 0.0
+
+    def _log_state(self, tag):
+        try:
+            geom = self.geometry()
+            logger.info(
+                "%s | visible=%s hidden=%s active=%s pos=(%s,%s) size=%sx%s flags=%s",
+                tag,
+                self.isVisible(),
+                self.isHidden(),
+                self.isActiveWindow(),
+                geom.x(),
+                geom.y(),
+                geom.width(),
+                geom.height(),
+                int(self.windowFlags()),
+            )
+        except Exception:
+            logger.exception("MainWindow state log failed for %s", tag)
 
     def init_ui(self):
         # Main container with rounded corners and border
@@ -170,7 +194,9 @@ class MainWindow(QWidget):
         layout.addWidget(self.btn_quit)
 
     def trigger_action(self, action):
+        self._log_state(f"trigger_action start action={action}")
         self.hide()
+        self._log_state(f"trigger_action after hide action={action}")
         # 强制刷新UI循环并稍作等待，确保窗口在截屏前完全从屏幕上消失
         from PySide6.QtWidgets import QApplication
         import time
@@ -181,10 +207,12 @@ class MainWindow(QWidget):
         # 但这里只发射字符串信号。具体的摄像头位置逻辑需要在 Controller 中处理。
         # 当从这里点击 "录制屏幕" (action='record') 时，Controller 会启动 ControlPanel
         
+        logger.info("MainWindow emitting action_triggered=%s", action)
         self.action_triggered.emit(action)
 
     def show_at_cursor(self):
         pos = QCursor.pos()
+        logger.info("show_at_cursor start cursor=(%s,%s)", pos.x(), pos.y())
         
         # 先显示以获取正确尺寸
         self.show()
@@ -230,6 +258,7 @@ class MainWindow(QWidget):
                 
         self.raise_()
         self.activateWindow() # 关键：获取焦点以便检测 focusOut
+        self._log_state("show_at_cursor end")
 
     def show_centered(self):
         screen = self.screen().geometry()
@@ -238,9 +267,22 @@ class MainWindow(QWidget):
         self.move(x, y)
         self.show()
         self.activateWindow()
+        self._log_state("show_centered end")
 
     def show_at_bottom_right(self):
         """显示在屏幕右下角（托盘区域上方）"""
+        now = time.monotonic()
+        if self._bottom_right_show_in_progress:
+            self._log_state("show_at_bottom_right skipped reentry")
+            return
+        if self.isVisible() and (now - self._last_bottom_right_show_at) < 0.25:
+            self._log_state("show_at_bottom_right skipped throttle")
+            self.raise_()
+            self.activateWindow()
+            return
+        self._bottom_right_show_in_progress = True
+        self._last_bottom_right_show_at = now
+        self._log_state("show_at_bottom_right before show")
         self.show()
         # 获取可用区域（不包含任务栏）
         screen_geo = self.screen().availableGeometry()
@@ -253,7 +295,14 @@ class MainWindow(QWidget):
         y = screen_geo.bottom() - h - 10
         
         self.move(x, y)
+        self.raise_()
         self.activateWindow()
+        self._log_state("show_at_bottom_right end")
+        QTimer.singleShot(200, self._clear_bottom_right_guard)
+
+    def _clear_bottom_right_guard(self):
+        self._bottom_right_show_in_progress = False
+        self._log_state("show_at_bottom_right guard cleared")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -270,5 +319,19 @@ class MainWindow(QWidget):
 
     def focusOutEvent(self, event):
         # 失去焦点时（点击外部）自动隐藏
+        self._log_state("focusOutEvent before hide")
         self.hide()
+        self._log_state("focusOutEvent after hide")
         super().focusOutEvent(event)
+
+    def showEvent(self, event):
+        self._log_state("showEvent")
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self._log_state("hideEvent")
+        super().hideEvent(event)
+
+    def closeEvent(self, event):
+        self._log_state("closeEvent")
+        super().closeEvent(event)

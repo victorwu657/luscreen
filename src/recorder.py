@@ -10,6 +10,8 @@ import sys
 import queue
 import json
 import socket
+import shutil
+import wave
 from datetime import datetime
 from src.audio_recorder import AudioRecorder
 # from src.system_audio_recorder import SystemAudioRecorder # 延迟导入以避免COM冲突
@@ -20,6 +22,8 @@ from src.video_processor import VideoProcessor
 
 # Use global logger if available, otherwise fallback
 logger = logging.getLogger('ScreenRecorder')
+_FFPROBE_PATH_CACHE = None
+_FFPROBE_PATH_RESOLVED = False
 
 def get_ffmpeg_path():
     """
@@ -41,12 +45,98 @@ def get_ffmpeg_path():
     # 2. 回退到 imageio_ffmpeg (开发环境通常用这个)
     return imageio_ffmpeg.get_ffmpeg_exe()
 
+
+def get_ffprobe_path():
+    """
+    获取 FFprobe 可执行文件路径。
+    仅返回已通过 `-version` 校验、确认真的是 ffprobe 的绝对路径；
+    若当前环境没有可用 ffprobe，则返回 None。
+    """
+    global _FFPROBE_PATH_CACHE, _FFPROBE_PATH_RESOLVED
+    if _FFPROBE_PATH_RESOLVED:
+        return _FFPROBE_PATH_CACHE
+
+    candidates = []
+
+    if getattr(sys, 'frozen', False):
+        base_path = os.path.dirname(sys.executable)
+    else:
+        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    local_ffprobe = os.path.join(base_path, 'ffprobe.exe')
+    if os.path.exists(local_ffprobe):
+        candidates.append(local_ffprobe)
+
+    try:
+        ffmpeg_path = get_ffmpeg_path()
+        ffmpeg_dir = os.path.dirname(ffmpeg_path)
+        ffmpeg_name = os.path.basename(ffmpeg_path)
+        sibling_candidates = [
+            os.path.join(ffmpeg_dir, 'ffprobe.exe'),
+        ]
+        if 'ffmpeg' in ffmpeg_name:
+            sibling_candidates.append(os.path.join(ffmpeg_dir, ffmpeg_name.replace('ffmpeg', 'ffprobe')))
+        if 'FFMPEG' in ffmpeg_name:
+            sibling_candidates.append(os.path.join(ffmpeg_dir, ffmpeg_name.replace('FFMPEG', 'FFPROBE')))
+        for candidate in sibling_candidates:
+            if os.path.exists(candidate):
+                candidates.append(candidate)
+    except Exception:
+        pass
+
+    path_ffprobe = shutil.which('ffprobe')
+    if path_ffprobe:
+        candidates.append(path_ffprobe)
+
+    seen = set()
+    startupinfo = None
+    if os.name == "nt":
+        try:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        except Exception:
+            startupinfo = None
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        candidate_norm = os.path.normcase(os.path.abspath(candidate))
+        if candidate_norm in seen:
+            continue
+        seen.add(candidate_norm)
+        try:
+            result = subprocess.run(
+                [candidate, "-version"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                startupinfo=startupinfo,
+            )
+            output = "\n".join([result.stdout or "", result.stderr or ""]).strip().lower()
+            if result.returncode == 0 and "ffprobe version" in output:
+                _FFPROBE_PATH_CACHE = os.path.abspath(candidate)
+                _FFPROBE_PATH_RESOLVED = True
+                return _FFPROBE_PATH_CACHE
+        except Exception:
+            continue
+
+    _FFPROBE_PATH_CACHE = None
+    _FFPROBE_PATH_RESOLVED = True
+    return None
+
+from src.logger import get_log_dir
 from src.utils import open_folder_and_select_file
+
+def _get_preview_temp_path(preview_path: str) -> str:
+    base, ext = os.path.splitext(preview_path)
+    if not ext:
+        return preview_path + ".tmp"
+    return f"{base}.tmp{ext}"
 
 def _create_preview_with_audio(*, video_path: str, mic_wav: str | None, sys_wav: str | None, preview_path: str, logger_obj=None) -> bool:
     log = logger_obj or logger
     marker_path = preview_path + ".generating"
-    temp_preview = preview_path + ".tmp"
+    temp_preview = _get_preview_temp_path(preview_path)
     
     try:
         ffmpeg_exe = get_ffmpeg_path()
@@ -96,7 +186,7 @@ def _create_preview_with_audio(*, video_path: str, mic_wav: str | None, sys_wav:
         filter_complex = "[1:a]aresample=48000,volume=1.5[aout]"
         cmd.extend(["-filter_complex", filter_complex, "-map", "0:v:0", "-map", "[aout]"])
 
-    cmd.extend(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", out])
+    cmd.extend(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", "-f", "mp4", out])
 
     startupinfo = None
     if os.name == "nt":
@@ -234,6 +324,7 @@ class ScreenRecorder(threading.Thread):
             self.fps = 60.0
         else:
             self.fps = 30.0
+        self._perf_window_size = max(30, int(self.fps))
             
         # 音频录制器
         self.mic_recorder = None
@@ -250,6 +341,19 @@ class ScreenRecorder(threading.Thread):
         self.last_valid_camera_frame = None
         self.camera_frame_none_count = 0
         self.camera_frame_total_count = 0
+        
+        # 阶段 0 性能埋点
+        self._perf_file = None
+        self._perf_path = None
+        self._perf_mode = "unknown"
+        self._perf_session_started = None
+        self._perf_sample_index = 0
+        self._perf_window = None
+        self._perf_total = None
+        self._perf_ffmpeg_startup_ms = 0.0
+        self._perf_write_join_ms = 0.0
+        self._perf_stop_audio_ms = 0.0
+        self._perf_stop_video_ms = 0.0
         
         # self.logger = logger # Removed, using self.logger initialized in __init__
 
@@ -285,6 +389,162 @@ class ScreenRecorder(threading.Thread):
         pts_inner = np.array([[1, 2], [1, 14], [4, 11], [6, 17], [7, 16], [5, 11], [9, 11]], np.int32)
         cv2.fillPoly(cursor, [pts_inner], (255, 255, 255, 255))
         return cursor
+
+    def _make_perf_bucket(self):
+        return {
+            "samples": 0,
+            "capture_ms_total": 0.0,
+            "capture_ms_max": 0.0,
+            "cursor_ms_total": 0.0,
+            "cursor_ms_max": 0.0,
+            "contiguous_ms_total": 0.0,
+            "contiguous_ms_max": 0.0,
+            "queue_wait_ms_total": 0.0,
+            "queue_wait_ms_max": 0.0,
+            "loop_ms_total": 0.0,
+            "loop_ms_max": 0.0,
+            "sleep_ms_total": 0.0,
+            "sleep_ms_max": 0.0,
+            "missed_frames_total": 0,
+            "queue_full_events": 0,
+            "camera_none_events": 0,
+            "frame_size_mismatches": 0,
+            "last_queue_size": -1,
+        }
+
+    def _perf_avg(self, total, count):
+        return (float(total) / float(count)) if count else 0.0
+
+    def _open_perf_log(self, mode):
+        self._close_perf_log()
+        self._perf_mode = mode
+        self._perf_session_started = time.perf_counter()
+        self._perf_sample_index = 0
+        self._perf_window = self._make_perf_bucket()
+        self._perf_total = self._make_perf_bucket()
+        self._perf_ffmpeg_startup_ms = 0.0
+        self._perf_write_join_ms = 0.0
+        self._perf_stop_audio_ms = 0.0
+        self._perf_stop_video_ms = 0.0
+        try:
+            logs_dir = get_log_dir()
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._perf_path = os.path.join(logs_dir, f"record_perf_{ts}.csv")
+            self._perf_file = open(self._perf_path, "w", encoding="utf-8")
+            self._perf_file.write(
+                "kind,sample_idx,samples,source_mode,capture_avg_ms,capture_max_ms,"
+                "cursor_avg_ms,cursor_max_ms,contiguous_avg_ms,contiguous_max_ms,"
+                "queue_wait_avg_ms,queue_wait_max_ms,loop_avg_ms,loop_max_ms,"
+                "sleep_avg_ms,sleep_max_ms,missed_frames,queue_full_events,"
+                "camera_none_events,frame_size_mismatches,last_queue_size,"
+                "ffmpeg_startup_ms,write_join_ms,stop_audio_ms,stop_video_ms,"
+                "total_runtime_ms,reason\n"
+            )
+            self._perf_file.flush()
+            self.logger.info("Recording perf logging enabled: %s", self._perf_path)
+        except Exception as e:
+            self._perf_file = None
+            self._perf_path = None
+            self.logger.warning("Failed to open recording perf log: %s", e)
+
+    def _update_perf_bucket(self, bucket, *, capture_ms, cursor_ms, contiguous_ms, queue_wait_ms, loop_ms, sleep_ms,
+                            missed_frames, queue_full_events, camera_none_events, frame_size_mismatches, queue_size):
+        bucket["samples"] += 1
+        bucket["capture_ms_total"] += capture_ms
+        bucket["capture_ms_max"] = max(bucket["capture_ms_max"], capture_ms)
+        bucket["cursor_ms_total"] += cursor_ms
+        bucket["cursor_ms_max"] = max(bucket["cursor_ms_max"], cursor_ms)
+        bucket["contiguous_ms_total"] += contiguous_ms
+        bucket["contiguous_ms_max"] = max(bucket["contiguous_ms_max"], contiguous_ms)
+        bucket["queue_wait_ms_total"] += queue_wait_ms
+        bucket["queue_wait_ms_max"] = max(bucket["queue_wait_ms_max"], queue_wait_ms)
+        bucket["loop_ms_total"] += loop_ms
+        bucket["loop_ms_max"] = max(bucket["loop_ms_max"], loop_ms)
+        bucket["sleep_ms_total"] += sleep_ms
+        bucket["sleep_ms_max"] = max(bucket["sleep_ms_max"], sleep_ms)
+        bucket["missed_frames_total"] += int(missed_frames)
+        bucket["queue_full_events"] += int(queue_full_events)
+        bucket["camera_none_events"] += int(camera_none_events)
+        bucket["frame_size_mismatches"] += int(frame_size_mismatches)
+        bucket["last_queue_size"] = queue_size
+
+    def _emit_perf_bucket(self, kind, bucket, reason="", include_totals=False):
+        if not self._perf_file or not bucket:
+            return
+        samples = bucket["samples"]
+        total_runtime_ms = 0.0
+        if include_totals and self._perf_session_started is not None:
+            total_runtime_ms = (time.perf_counter() - self._perf_session_started) * 1000.0
+        self._perf_file.write(
+            f"{kind},{self._perf_sample_index},{samples},{self._perf_mode},"
+            f"{self._perf_avg(bucket['capture_ms_total'], samples):.3f},{bucket['capture_ms_max']:.3f},"
+            f"{self._perf_avg(bucket['cursor_ms_total'], samples):.3f},{bucket['cursor_ms_max']:.3f},"
+            f"{self._perf_avg(bucket['contiguous_ms_total'], samples):.3f},{bucket['contiguous_ms_max']:.3f},"
+            f"{self._perf_avg(bucket['queue_wait_ms_total'], samples):.3f},{bucket['queue_wait_ms_max']:.3f},"
+            f"{self._perf_avg(bucket['loop_ms_total'], samples):.3f},{bucket['loop_ms_max']:.3f},"
+            f"{self._perf_avg(bucket['sleep_ms_total'], samples):.3f},{bucket['sleep_ms_max']:.3f},"
+            f"{bucket['missed_frames_total']},{bucket['queue_full_events']},"
+            f"{bucket['camera_none_events']},{bucket['frame_size_mismatches']},{bucket['last_queue_size']},"
+            f"{self._perf_ffmpeg_startup_ms:.3f},{self._perf_write_join_ms:.3f},"
+            f"{self._perf_stop_audio_ms:.3f},{self._perf_stop_video_ms:.3f},{total_runtime_ms:.3f},{reason}\n"
+        )
+        self._perf_file.flush()
+
+    def _record_perf_sample(self, *, capture_ms, cursor_ms, contiguous_ms, queue_wait_ms, loop_ms, sleep_ms,
+                            missed_frames=0, queue_full_events=0, camera_none_events=0,
+                            frame_size_mismatches=0, queue_size=-1):
+        if self._perf_window is None or self._perf_total is None:
+            return
+        self._update_perf_bucket(
+            self._perf_window,
+            capture_ms=capture_ms,
+            cursor_ms=cursor_ms,
+            contiguous_ms=contiguous_ms,
+            queue_wait_ms=queue_wait_ms,
+            loop_ms=loop_ms,
+            sleep_ms=sleep_ms,
+            missed_frames=missed_frames,
+            queue_full_events=queue_full_events,
+            camera_none_events=camera_none_events,
+            frame_size_mismatches=frame_size_mismatches,
+            queue_size=queue_size,
+        )
+        self._update_perf_bucket(
+            self._perf_total,
+            capture_ms=capture_ms,
+            cursor_ms=cursor_ms,
+            contiguous_ms=contiguous_ms,
+            queue_wait_ms=queue_wait_ms,
+            loop_ms=loop_ms,
+            sleep_ms=sleep_ms,
+            missed_frames=missed_frames,
+            queue_full_events=queue_full_events,
+            camera_none_events=camera_none_events,
+            frame_size_mismatches=frame_size_mismatches,
+            queue_size=queue_size,
+        )
+        if self._perf_window["samples"] >= self._perf_window_size:
+            self._perf_sample_index += 1
+            self._emit_perf_bucket("window", self._perf_window, reason="window")
+            self._perf_window = self._make_perf_bucket()
+
+    def _finalize_perf_log(self, reason):
+        if self._perf_window and self._perf_window["samples"] > 0:
+            self._perf_sample_index += 1
+            self._emit_perf_bucket("window", self._perf_window, reason="flush")
+            self._perf_window = self._make_perf_bucket()
+        if self._perf_total and self._perf_total["samples"] > 0:
+            self._emit_perf_bucket("summary", self._perf_total, reason=reason, include_totals=True)
+        self._close_perf_log()
+
+    def _close_perf_log(self):
+        if self._perf_file:
+            try:
+                self._perf_file.close()
+            except Exception:
+                pass
+        self._perf_file = None
+        self._perf_path = None
 
     def draw_cursor(self, frame):
         try:
@@ -347,7 +607,6 @@ class ScreenRecorder(threading.Thread):
             return False
             
         # Rust Core limitations:
-        # - Full screen only (for now)
         # - No camera-only mode
         # - No audio-only mode
         # - No custom frame provider
@@ -357,41 +616,142 @@ class ScreenRecorder(threading.Thread):
         if self.region is None:
             return True
             
-        # Check if region matches full screen
         try:
-            if not self.sct: self.sct = mss.mss()
+            if not self.sct:
+                self.sct = mss.mss()
             monitor = self.sct.monitors[1]
-            
-            # Allow small margin of error
-            is_fullscreen = (abs(self.region['top'] - monitor['top']) < 5 and 
-                             abs(self.region['left'] - monitor['left']) < 5 and 
-                             abs(self.region['width'] - monitor['width']) < 5 and 
-                             abs(self.region['height'] - monitor['height']) < 5)
-            return is_fullscreen
+            left = int(self.region.get('left', 0))
+            top = int(self.region.get('top', 0))
+            width = int(self.region.get('width', 0))
+            height = int(self.region.get('height', 0))
+            if width <= 1 or height <= 1:
+                return False
+            return (
+                left >= monitor['left'] and
+                top >= monitor['top'] and
+                left + width <= monitor['left'] + monitor['width'] and
+                top + height <= monitor['top'] + monitor['height']
+            )
         except Exception:
             return False
+
+    def _get_rust_capture_region(self):
+        if self.region is None:
+            return None
+        try:
+            if not self.sct:
+                self.sct = mss.mss()
+            monitor = self.sct.monitors[1]
+            left = max(0, int(self.region.get('left', 0)) - int(monitor['left']))
+            top = max(0, int(self.region.get('top', 0)) - int(monitor['top']))
+            width = max(2, (int(self.region.get('width', 0)) // 2) * 2)
+            height = max(2, (int(self.region.get('height', 0)) // 2) * 2)
+            max_width = max(2, int(monitor['width']) - left)
+            max_height = max(2, int(monitor['height']) - top)
+            return {
+                "left": left,
+                "top": top,
+                "width": min(width, max_width),
+                "height": min(height, max_height),
+            }
+        except Exception as e:
+            self.logger.warning(f"Failed to build Rust capture region, fallback to Python backend: {e}")
+            return None
 
     def _get_video_duration(self, filename):
         """Get duration of a video file in seconds using ffprobe."""
         try:
-            ffmpeg_path = get_ffmpeg_path()
-            ffprobe_path = ffmpeg_path.replace('ffmpeg.exe', 'ffprobe.exe')
-            if not os.path.exists(ffprobe_path):
-                # Try generic command
-                ffprobe_path = 'ffprobe'
-            
-            cmd = [
-                ffprobe_path, 
+            ffprobe_path = get_ffprobe_path()
+            if ffprobe_path:
+                cmd = [
+                ffprobe_path,
                 '-v', 'error', 
                 '-show_entries', 'format=duration', 
                 '-of', 'default=noprint_wrappers=1:nokey=1', 
                 filename
-            ]
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            return float(result.stdout.strip())
+                ]
+                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                stdout = (result.stdout or "").strip()
+                if result.returncode == 0 and stdout:
+                    duration = float(stdout)
+                    if duration > 0:
+                        return duration
+                if result.returncode != 0:
+                    self.logger.warning(
+                        "ffprobe duration probe failed for %s with code=%s stderr=%s",
+                        filename,
+                        result.returncode,
+                        (result.stderr or "").strip(),
+                    )
+            else:
+                self.logger.info("ffprobe unavailable, using cv2 duration fallback for %s", filename)
         except Exception as e:
             self.logger.error(f"Failed to get duration for {filename}: {e}")
-            return 0.0
+
+        try:
+            cap = cv2.VideoCapture(filename)
+            if not cap.isOpened():
+                return 0.0
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            frames = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
+            cap.release()
+            if fps > 0 and frames > 0:
+                duration = frames / fps
+                if duration > 0:
+                    self.logger.info("Video duration fallback via cv2 for %s: %.6fs", filename, duration)
+                    return duration
+        except Exception as e:
+            self.logger.error(f"Fallback duration probe failed for {filename}: {e}")
+        return 0.0
+
+    def _trim_wav_to_duration(self, wav_path, target_duration_sec, label="audio"):
+        """Trim a WAV file in place so segment audio does not overrun its video segment."""
+        if not wav_path or not os.path.exists(wav_path):
+            return False
+        try:
+            target_duration_sec = float(target_duration_sec or 0.0)
+        except Exception:
+            target_duration_sec = 0.0
+        if target_duration_sec <= 0.0:
+            return False
+
+        try:
+            with wave.open(wav_path, "rb") as wf:
+                params = wf.getparams()
+                sample_rate = int(wf.getframerate() or 0)
+                actual_frames = int(wf.getnframes() or 0)
+                if sample_rate <= 0 or actual_frames <= 0:
+                    return False
+
+                target_frames = int(round(target_duration_sec * sample_rate))
+                if target_frames <= 0 or actual_frames <= target_frames:
+                    return False
+
+                trimmed_frames = wf.readframes(target_frames)
+
+            temp_trimmed = wav_path + ".trim.tmp"
+            with wave.open(temp_trimmed, "wb") as out_wf:
+                out_wf.setparams(params)
+                out_wf.writeframes(trimmed_frames)
+
+            os.replace(temp_trimmed, wav_path)
+            self.logger.info(
+                "Trimmed %s to match video duration: path=%s target_sec=%.6f actual_sec=%.6f",
+                label,
+                wav_path,
+                target_duration_sec,
+                float(actual_frames) / float(sample_rate),
+            )
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to trim {label} WAV {wav_path}: {e}")
+            try:
+                temp_trimmed = wav_path + ".trim.tmp"
+                if os.path.exists(temp_trimmed):
+                    os.remove(temp_trimmed)
+            except Exception:
+                pass
+            return False
 
     def _merge_segments(self):
         """Merge all recorded segments into one continuous file."""
@@ -432,7 +792,7 @@ class ScreenRecorder(threading.Thread):
                         cmd_mix_audio.extend(['-filter_complex', filter_complex, '-map', '[aout]', '-c:a', 'pcm_s16le', '-ar', '48000', mixed_audio_wav])
 
                         self.logger.info(f"Generating mixed audio WAV: {' '.join(cmd_mix_audio)}")
-                        res = subprocess.run(cmd_mix_audio, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        res = subprocess.run(cmd_mix_audio, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=300)
 
                         if res.returncode == 0 and os.path.exists(mixed_audio_wav) and os.path.getsize(mixed_audio_wav) > 0:
                             self.logger.info(f"Mixed audio WAV created: {mixed_audio_wav}")
@@ -462,12 +822,13 @@ class ScreenRecorder(threading.Thread):
                             '-c:v', 'copy',
                             '-c:a', 'aac', '-b:a', '192k', '-ar', '48000',
                             '-map', '0:v', '-map', '1:a',
+                            '-shortest',
                             '-movflags', '+faststart',
                             final_output_temp
                         ]
 
                         self.logger.info(f"Muxing Final Video: {' '.join(cmd_mux)}")
-                        res_mux = subprocess.run(cmd_mux, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                        res_mux = subprocess.run(cmd_mux, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=300)
 
                         if res_mux.returncode == 0 and os.path.exists(final_output_temp) and os.path.getsize(final_output_temp) > 0:
                             self.logger.info("Final Mux Successful.")
@@ -519,6 +880,13 @@ class ScreenRecorder(threading.Thread):
 
         # Multiple segments case
         ffmpeg_exe = get_ffmpeg_path()
+        segment_durations = []
+        for idx, seg in enumerate(self.segments):
+            seg_duration = 0.0
+            if os.path.exists(seg['video']):
+                seg_duration = self._get_video_duration(seg['video'])
+            segment_durations.append(seg_duration)
+            self.logger.info("[Seg %s] video duration for merge: %.6fs", idx, seg_duration)
         
         # 1. Merge Video
         video_list_file = os.path.join(os.path.dirname(self.temp_video), 'video_list.txt')
@@ -547,8 +915,9 @@ class ScreenRecorder(threading.Thread):
             mic_list_file = os.path.join(os.path.dirname(self.temp_video), 'mic_list.txt')
             mic_segments_found = 0
             with open(mic_list_file, 'w', encoding='utf-8') as f:
-                for seg in self.segments:
+                for idx, seg in enumerate(self.segments):
                     if seg['mic'] and os.path.exists(seg['mic']) and os.path.getsize(seg['mic']) > 100:
+                        self._trim_wav_to_duration(seg['mic'], segment_durations[idx], f"mic seg {idx}")
                         path = seg['mic'].replace('\\', '/')
                         f.write(f"file '{path}'\n")
                         mic_segments_found += 1
@@ -588,8 +957,9 @@ class ScreenRecorder(threading.Thread):
             sys_list_file = os.path.join(os.path.dirname(self.temp_video), 'sys_list.txt')
             sys_segments_found = 0
             with open(sys_list_file, 'w', encoding='utf-8') as f:
-                for seg in self.segments:
+                for idx, seg in enumerate(self.segments):
                     if seg['sys'] and os.path.exists(seg['sys']) and os.path.getsize(seg['sys']) > 100:
+                        self._trim_wav_to_duration(seg['sys'], segment_durations[idx], f"sys seg {idx}")
                         path = seg['sys'].replace('\\', '/')
                         f.write(f"file '{path}'\n")
                         sys_segments_found += 1
@@ -620,7 +990,7 @@ class ScreenRecorder(threading.Thread):
         current_time_offset = 0.0
         cursor_burned_in = False
         
-        for seg in self.segments:
+        for idx, seg in enumerate(self.segments):
             if os.path.exists(seg['meta']):
                 try:
                     with open(seg['meta'], 'r') as f:
@@ -644,7 +1014,7 @@ class ScreenRecorder(threading.Thread):
             
             # Update offset by duration of this video segment
             if os.path.exists(seg['video']):
-                duration = self._get_video_duration(seg['video'])
+                duration = segment_durations[idx] if idx < len(segment_durations) else self._get_video_duration(seg['video'])
                 current_time_offset += duration
         
         # Save merged metadata
@@ -738,29 +1108,31 @@ class ScreenRecorder(threading.Thread):
         
         # Helper to stop recorders safely
         def stop_current_recorders(save_segment=True):
+            mouse_data = []
             try:
                 self.logger.info("stop_current_recorders start seg=%s save_segment=%s", segment_index, save_segment)
 
-                # Stop Audio Recorders first so Rust core can observe EOF on audio streams.
+                # Rust segmented mode records video/cursor independently from Python audio recorders.
+                # Stop the Rust recorder first to avoid racing native teardown against audio shutdown.
+                self.logger.info("Stopping rust recorder before audio recorders")
+                mouse_data = recorder.stop()
+                self.logger.info("Rust recorder stop finished seg=%s mouse_events=%s", segment_index, len(mouse_data) if mouse_data else 0)
+            except Exception as e:
+                self.logger.exception(f"Error stopping segment: {e}")
+            finally:
                 if self.mic_recorder:
-                    self.logger.info("Stopping mic recorder before rust stop. alive=%s", self.mic_recorder.is_alive())
+                    self.logger.info("Stopping mic recorder after rust stop. alive=%s", self.mic_recorder.is_alive())
                     self.mic_recorder.stop()
                     self.logger.info("Mic recorder stop finished alive=%s", self.mic_recorder.is_alive())
                     if self.mic_recorder.is_alive():
-                        self.logger.warning("Mic recorder still alive before rust stop")
+                        self.logger.warning("Mic recorder still alive after rust stop")
                 
                 if self.sys_recorder:
-                    self.logger.info("Stopping system audio recorder before rust stop. alive=%s", self.sys_recorder.is_alive())
-                    self.sys_recorder.stop_event.set()
-                    self.sys_recorder.join(timeout=3.0)
+                    self.logger.info("Stopping system audio recorder after rust stop. alive=%s", self.sys_recorder.is_alive())
+                    self.sys_recorder.stop()
                     self.logger.info("System audio recorder stop finished alive=%s", self.sys_recorder.is_alive())
                     if self.sys_recorder.is_alive():
-                        self.logger.warning("System audio recorder still alive before rust stop")
-
-                # Stop Rust Recorder after audio streams have closed.
-                self.logger.info("Stopping rust recorder after audio recorders")
-                mouse_data = recorder.stop()
-                self.logger.info("Rust recorder stop finished seg=%s mouse_events=%s", segment_index, len(mouse_data) if mouse_data else 0)
+                        self.logger.warning("System audio recorder still alive after rust stop")
 
                 if save_segment:
                     # Log Segment Audio Sizes
@@ -800,8 +1172,6 @@ class ScreenRecorder(threading.Thread):
                         'sys': current_sys if self.record_system_audio else None,
                         'meta': meta_file
                     })
-            except Exception as e:
-                self.logger.error(f"Error stopping segment: {e}")
 
         try:
             while not self.stop_event.is_set():
@@ -847,7 +1217,17 @@ class ScreenRecorder(threading.Thread):
                 
                 # 3. Start Rust Video
                 recorder = rust_core.ScreenRecorder()
-                recorder.start(current_video)
+                rust_region = self._get_rust_capture_region()
+                if rust_region:
+                    recorder.start(
+                        current_video,
+                        rust_region["left"],
+                        rust_region["top"],
+                        rust_region["width"],
+                        rust_region["height"],
+                    )
+                else:
+                    recorder.start(current_video)
                 
                 # --- Recording Loop for this segment ---
                 segment_active = True
@@ -936,6 +1316,8 @@ class ScreenRecorder(threading.Thread):
                 return self._run_rust_core()
             except Exception as e:
                 self.logger.error(f"Rust Core startup failed, fallback to Python backend: {e}")
+
+        self._open_perf_log("python_camera" if self.frame_provider else "python_screen")
             
         self.region['top'] = int(self.region['top'])
         self.region['left'] = int(self.region['left'])
@@ -1147,6 +1529,7 @@ class ScreenRecorder(threading.Thread):
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             
             try:
+                ffmpeg_start_started = time.perf_counter()
                 self.logger.info(f"Starting FFmpeg process: {' '.join(cmd)}")
                 
                 # 增大 pipe buffer size (Windows default is small, causing blocking if write is fast)
@@ -1161,13 +1544,17 @@ class ScreenRecorder(threading.Thread):
                     ret = self.ffmpeg_process.wait(timeout=0.5)
                     self.logger.error(f"FFmpeg exited immediately with code {ret}!")
                     self.is_recording = False
+                    self._perf_ffmpeg_startup_ms = (time.perf_counter() - ffmpeg_start_started) * 1000.0
+                    self._finalize_perf_log("ffmpeg_exited_immediately")
                     return
                 except subprocess.TimeoutExpired:
                     self.logger.info("FFmpeg process is running stable.")
+                self._perf_ffmpeg_startup_ms = (time.perf_counter() - ffmpeg_start_started) * 1000.0
                     
             except Exception as e:
                 self.logger.error(f"Failed to start FFmpeg process: {e}")
                 self.is_recording = False
+                self._finalize_perf_log("ffmpeg_start_failed")
                 return
             
             # 初始化写入队列和线程
@@ -1220,6 +1607,16 @@ class ScreenRecorder(threading.Thread):
         # (Already initialized in __init__ to allow test injection)
         
         while not self.stop_event.is_set():
+            loop_started = time.perf_counter()
+            capture_ms = 0.0
+            cursor_ms = 0.0
+            contiguous_ms = 0.0
+            queue_wait_ms = 0.0
+            queue_full_events = 0
+            camera_none_events = 0
+            frame_size_mismatches = 0
+            missed_frames_this_loop = 0
+            queue_size = self.frame_queue.qsize() if hasattr(self, "frame_queue") and self.frame_queue else -1
             # 检查暂停
             if not self.pause_event.is_set():
                 if self.last_pause_start == 0:
@@ -1247,6 +1644,7 @@ class ScreenRecorder(threading.Thread):
                 continue
 
             try:
+                capture_started = time.perf_counter()
                 if self.frame_provider:
                     frame = self.frame_provider.get_current_frame()
                     self.camera_frame_total_count += 1
@@ -1282,6 +1680,7 @@ class ScreenRecorder(threading.Thread):
                             self.logger.info(f"[CamDebug] Valid frame: {frame.shape}, Mean: {np.mean(frame)}")
                             
                     else:
+                        camera_none_events = 1
                         # 获取失败（None），尝试使用上一帧缓存
                         self.camera_frame_none_count += 1
                         
@@ -1306,24 +1705,45 @@ class ScreenRecorder(threading.Thread):
                 else:
                     img = self.sct.grab(self.region)
                     frame = np.array(img)
+                    capture_ms = (time.perf_counter() - capture_started) * 1000.0
+                    cursor_started = time.perf_counter()
                     self.draw_cursor(frame) # Enable baked-in cursor for perfect sync and avoiding dual cursor
+                    cursor_ms = (time.perf_counter() - cursor_started) * 1000.0
+                if self.frame_provider:
+                    capture_ms = (time.perf_counter() - capture_started) * 1000.0
                 
                 if self.ffmpeg_process and self.ffmpeg_process.poll() is None:
                     # 关键修复：确保帧数据在内存中是连续的，否则 FFmpeg 会报错 "Invalid NAL unit size"
+                    contiguous_started = time.perf_counter()
                     frame = np.ascontiguousarray(frame)
                     
                     # 严格校验数据大小，防止写入错误数据导致视频流损坏
                     expected_bytes = self.region['width'] * self.region['height'] * 4
+                    contiguous_ms = (time.perf_counter() - contiguous_started) * 1000.0
                     if frame.nbytes != expected_bytes:
                         self.logger.error(f"Frame size mismatch! Expected {expected_bytes}, got {frame.nbytes} (Shape: {frame.shape}). Skipping frame.")
+                        frame_size_mismatches = 1
+                        self._record_perf_sample(
+                            capture_ms=capture_ms,
+                            cursor_ms=cursor_ms,
+                            contiguous_ms=contiguous_ms,
+                            queue_wait_ms=queue_wait_ms,
+                            loop_ms=(time.perf_counter() - loop_started) * 1000.0,
+                            sleep_ms=0.0,
+                            frame_size_mismatches=frame_size_mismatches,
+                            camera_none_events=camera_none_events,
+                            queue_size=queue_size,
+                        )
                         continue
 
                     # 使用 memoryview 避免复制
                     frame_view = memoryview(frame)
                     
                     # 放入队列，如果队列满则阻塞等待，保证不丢帧以维持音画同步
+                    queue_started = time.perf_counter()
                     try:
                         self.frame_queue.put(frame_view, timeout=1.0)
+                        queue_wait_ms = (time.perf_counter() - queue_started) * 1000.0
                         
                         # Record mouse data for this frame
                         mx, my = get_mouse_pos()
@@ -1338,6 +1758,8 @@ class ScreenRecorder(threading.Thread):
                         }
                         self.mouse_data.append(current_meta)
                     except queue.Full:
+                        queue_wait_ms = (time.perf_counter() - queue_started) * 1000.0
+                        queue_full_events = 1
                         now = time.time()
                         if now - self._last_queue_full_log_at >= 2.0:
                             self._last_queue_full_log_at = now
@@ -1354,6 +1776,7 @@ class ScreenRecorder(threading.Thread):
                     if current_time > next_frame_time + frame_duration:
                         missed_frames = int((current_time - next_frame_time) / frame_duration) - 1
                         missed_frames = min(missed_frames, 5) 
+                        missed_frames_this_loop = max(0, missed_frames)
                         
                         if missed_frames > 0:
                             # 补帧也放入队列
@@ -1387,11 +1810,27 @@ class ScreenRecorder(threading.Thread):
             
             # 精确睡眠
             delay = max(0, next_frame_time - time.time())
+            queue_size = self.frame_queue.qsize() if hasattr(self, "frame_queue") and self.frame_queue else -1
+            self._record_perf_sample(
+                capture_ms=capture_ms,
+                cursor_ms=cursor_ms,
+                contiguous_ms=contiguous_ms,
+                queue_wait_ms=queue_wait_ms,
+                loop_ms=(time.perf_counter() - loop_started) * 1000.0,
+                sleep_ms=delay * 1000.0,
+                missed_frames=missed_frames_this_loop,
+                queue_full_events=queue_full_events,
+                camera_none_events=camera_none_events,
+                frame_size_mismatches=frame_size_mismatches,
+                queue_size=queue_size,
+            )
             time.sleep(delay)
             
         # 等待写入线程结束
         if self.write_thread and self.write_thread.is_alive():
+            join_started = time.perf_counter()
             self.write_thread.join(timeout=5.0)
+            self._perf_write_join_ms = (time.perf_counter() - join_started) * 1000.0
 
         # 停止视频写入
         self.logger.info("Stopping ScreenRecorder...")
@@ -1409,7 +1848,8 @@ class ScreenRecorder(threading.Thread):
             self.mic_recorder.join(timeout=0.5)
         if self.sys_recorder and self.sys_recorder.is_alive():
             self.sys_recorder.join(timeout=0.5)
-        self.logger.info(f"Audio stop signals sent in: {time.time() - stop_audio_start:.2f}s")
+        self._perf_stop_audio_ms = (time.time() - stop_audio_start) * 1000.0
+        self.logger.info(f"Audio stop signals sent in: {self._perf_stop_audio_ms / 1000.0:.2f}s")
 
         # 2. 然后停止视频写入 (关闭 stdin)
         stop_video_start = time.time()
@@ -1441,7 +1881,8 @@ class ScreenRecorder(threading.Thread):
                 self.ffmpeg_process.kill()
         else:
              self.logger.warning("FFmpeg process was None during stop")
-        self.logger.info(f"Stop video writing took: {time.time() - stop_video_start:.2f}s")
+        self._perf_stop_video_ms = (time.time() - stop_video_start) * 1000.0
+        self.logger.info(f"Stop video writing took: {self._perf_stop_video_ms / 1000.0:.2f}s")
 
         # 3. 异步保存鼠标元数据 (14分钟的数据量很大，不要阻塞主流程)
         def save_meta_async(video_path, mouse_data):
@@ -1489,6 +1930,7 @@ class ScreenRecorder(threading.Thread):
                  self.logger.error(f"CRITICAL: Final output file DOES NOT EXIST: {self.final_output}")
         
         self.logger.info("Recording stopped. File ready.")
+        self._finalize_perf_log("recording_stopped")
         
         # 5. 执行后续处理 (生成预览、打开文件夹等)
         self._finalize_recording()

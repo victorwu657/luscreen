@@ -112,43 +112,29 @@ class AudioMonitor(QThread):
                 self.p.terminate()
         except Exception:
             pass
+        finally:
+            self.p = None
+
+    def _request_stop(self):
+        self.is_running = False
+        self.requestInterruption()
 
     def stop(self):
         logger.info("AudioMonitor stop requested device_index=%s running=%s", self.device_index, self.isRunning())
-        self.is_running = False
-        self.requestInterruption()
-        stream = self.stream
-        if stream is not None:
-            try:
-                if stream.is_active():
-                    stream.stop_stream()
-            except Exception as e:
-                logger.warning("AudioMonitor stop_stream failed: %s", e)
-            try:
-                stream.close()
-            except Exception as e:
-                logger.warning("AudioMonitor close stream failed: %s", e)
-        if not self.wait(800):
-            logger.warning("AudioMonitor stop timeout. forcing terminate.")
-            self.terminate()
-            self.wait(300)
+        self._request_stop()
+        if not self.wait(1500):
+            logger.error(
+                "AudioMonitor stop timeout. leaving worker to finish asynchronously to avoid cross-thread PortAudio teardown."
+            )
+            _retain_audio_monitor(self)
+            self.finished.connect(lambda m=self: _release_audio_monitor(m))
         logger.info("AudioMonitor stop finished device_index=%s running=%s", self.device_index, self.isRunning())
 
     def request_stop_nonblocking(self):
         logger.info("AudioMonitor nonblocking stop requested device_index=%s running=%s", self.device_index, self.isRunning())
-        self.is_running = False
-        self.requestInterruption()
-        stream = self.stream
-        if stream is not None:
-            try:
-                if stream.is_active():
-                    stream.stop_stream()
-            except Exception as e:
-                logger.warning("AudioMonitor nonblocking stop_stream failed: %s", e)
-            try:
-                stream.close()
-            except Exception as e:
-                logger.warning("AudioMonitor nonblocking close stream failed: %s", e)
+        # Only signal the worker thread to exit. The worker performs its own
+        # PyAudio/PortAudio cleanup in finally to avoid native crashes on Windows.
+        self._request_stop()
 
     def enterEvent(self, event):
         if self.text() and self.toolTip():

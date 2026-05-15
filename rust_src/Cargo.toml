@@ -27,6 +27,7 @@ serde_json = "1.0"
 
 # Audio capture
 cpal = "0.15.2"
+hound = "3.5"
 
 # FFmpeg bindings
 # ffmpeg-next = { version = "6.0.0", features = ["build"] }

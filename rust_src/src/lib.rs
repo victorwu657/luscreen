@@ -10,9 +10,14 @@ use std::time::Duration;
 mod capturer;
 mod processor;
 mod gpu_processor;
+mod timeline;
+mod audio_timeline;
 use capturer::MouseData;
+use capturer::CaptureRegion;
 use processor::ParallelProcessor;
 use gpu_processor::GpuProcessor;
+use timeline::FrameStateEngine;
+use audio_timeline::AudioTimelineBuilder;
 
 /// A Python class for screen recording.
 #[pyclass]
@@ -39,7 +44,15 @@ impl ScreenRecorder {
 
     /// Starts recording to the specified file.
     /// This method spawns a new thread and returns immediately.
-    fn start(&mut self, filename: String) -> PyResult<()> {
+    #[pyo3(signature = (filename, left=None, top=None, width=None, height=None))]
+    fn start(
+        &mut self,
+        filename: String,
+        left: Option<u32>,
+        top: Option<u32>,
+        width: Option<u32>,
+        height: Option<u32>,
+    ) -> PyResult<()> {
         if self.handle.is_some() {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
                 "Recording is already in progress",
@@ -56,12 +69,26 @@ impl ScreenRecorder {
         let stop_signal = self.stop_signal.clone();
         let mouse_storage = self.mouse_storage.clone();
         let filename_clone = filename.clone();
+        let capture_region = match (left, top, width, height) {
+            (None, None, None, None) => None,
+            (Some(left), Some(top), Some(width), Some(height)) => Some(CaptureRegion {
+                left,
+                top,
+                width,
+                height,
+            }),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "left, top, width, height 必须同时提供，或全部省略",
+                ));
+            }
+        };
         let (tx, rx) = mpsc::channel();
 
         // Spawn a thread to run the capture loop
         // We use a thread because windows-capture blocks the current thread
         let handle = thread::spawn(move || {
-            if let Err(e) = capturer::start_capture(filename_clone, stop_signal, mouse_storage) {
+            if let Err(e) = capturer::start_capture(filename_clone, stop_signal, mouse_storage, capture_region) {
                 log::error!("Capture failed: {}", e);
             }
             let _ = tx.send(());
@@ -138,5 +165,7 @@ fn rust_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ScreenRecorder>()?;
     m.add_class::<ParallelProcessor>()?;
     m.add_class::<GpuProcessor>()?;
+    m.add_class::<FrameStateEngine>()?;
+    m.add_class::<AudioTimelineBuilder>()?;
     Ok(())
 }

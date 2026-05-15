@@ -5,6 +5,7 @@ import ctypes
 from ctypes import wintypes
 import os
 import logging
+import threading
 
 logger = logging.getLogger("ControlBar")
 
@@ -218,3 +219,17 @@ class ControlBar(QWidget):
 
     def mouseReleaseEvent(self, event):
         self.old_pos = None
+
+    def closeEvent(self, event):
+        logger.info(
+            "ControlBar closeEvent thread=%s timer_active=%s visible=%s",
+            threading.current_thread().name,
+            self.timer.isActive() if hasattr(self, "timer") else None,
+            self.isVisible(),
+        )
+        try:
+            if hasattr(self, "timer") and self.timer.isActive():
+                self.timer.stop()
+        except Exception:
+            logger.exception("ControlBar timer stop failed during closeEvent")
+        super().closeEvent(event)

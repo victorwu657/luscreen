@@ -13,7 +13,10 @@ import queue
 import importlib
 import importlib.util
 import importlib.machinery
+import inspect
+import site
 from PIL import Image, ImageDraw, ImageFont
+from src.logger import get_log_dir
 from src.utils import safe_add_dll_directory, get_runtime_base_dir
 
 logger = logging.getLogger("VideoProcessor")
@@ -38,7 +41,7 @@ class SpringVariable:
         return self.value
 
 class VideoProcessor:
-    def __init__(self, input_path, metadata_path, output_path, base_zoom=1.0, click_zoom=2.0, fps=30, start_time=0, end_time=None, click_duration=2.0, watermark_text="", watermark_pos="bottom-right", watermark_pos_x=None, watermark_pos_y=None, watermark_size=1.0, watermark_use_image=False, watermark_image_path=None, target_resolution=None, use_gpu=False, background_path=None, bg_padding_ratio=0.0, video_corner_radius_ratio=0.0):
+    def __init__(self, input_path, metadata_path, output_path, base_zoom=1.0, click_zoom=2.0, fps=30, start_time=0, end_time=None, click_duration=2.0, watermark_text="", watermark_pos="bottom-right", watermark_pos_x=None, watermark_pos_y=None, watermark_size=1.0, watermark_use_image=False, watermark_image_path=None, target_resolution=None, use_gpu=False, background_path=None, bg_padding_ratio=0.0, video_corner_radius_ratio=0.0, segments=None, merge_source_audio=True, cancel_check=None):
         self.input_path = input_path
         self.metadata_path = metadata_path
         self.output_path = output_path
@@ -61,6 +64,9 @@ class VideoProcessor:
         self.background_path = background_path
         self.bg_padding_ratio = bg_padding_ratio
         self.video_corner_radius_ratio = video_corner_radius_ratio
+        self.segments = list(segments or [])
+        self.merge_source_audio = bool(merge_source_audio)
+        self.cancel_check = cancel_check
         self.cursor_img = self._create_cursor()
         self.clicks = [] 
         self.watermark_overlay = None
@@ -120,6 +126,191 @@ class VideoProcessor:
                 return local_ffmpeg
         return imageio_ffmpeg.get_ffmpeg_exe()
 
+    def _normalize_segments(self, total_frames):
+        raw_segments = self.segments or [(self.start_time, self.end_time)]
+        normalized = []
+        fps = self.source_fps if self.source_fps > 0 else float(self.target_fps or 30)
+
+        for seg in raw_segments:
+            start_sec = 0.0
+            end_sec = None
+
+            if isinstance(seg, dict):
+                if 'source_start' in seg or 'source_end' in seg:
+                    start_sec = float(seg.get('source_start', 0) or 0) / 1000.0
+                    raw_end = seg.get('source_end')
+                    end_sec = float(raw_end) / 1000.0 if raw_end is not None else None
+                else:
+                    start_sec = float(seg.get('start_time', 0) or 0)
+                    raw_end = seg.get('end_time')
+                    end_sec = float(raw_end) if raw_end is not None else None
+            elif isinstance(seg, (list, tuple)):
+                if len(seg) >= 1:
+                    start_sec = float(seg[0] or 0)
+                if len(seg) >= 2 and seg[1] is not None:
+                    end_sec = float(seg[1])
+            else:
+                continue
+
+            start_frame = max(0, int(start_sec * fps))
+            end_frame = total_frames if end_sec is None else int(end_sec * fps)
+            end_frame = min(total_frames, max(0, end_frame))
+            if end_frame <= start_frame:
+                continue
+
+            normalized.append({
+                "start_frame": start_frame,
+                "end_frame": end_frame,
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+            })
+
+        return normalized
+
+    def _prepare_batch_frame(self, frame, prefer_buffer=False):
+        if isinstance(frame, np.ndarray):
+            if frame.flags["C_CONTIGUOUS"]:
+                return frame if prefer_buffer else frame.tobytes()
+            logger.warning("[VideoProcessor] Non-contiguous frame detected, copying once before batch handoff")
+            contiguous = np.ascontiguousarray(frame)
+            return contiguous if prefer_buffer else contiguous.tobytes()
+
+        if prefer_buffer:
+            try:
+                return memoryview(frame)
+            except TypeError:
+                pass
+        return frame
+
+    def _reset_segment_state(self, width, height):
+        self.spring_cam_x.value = width / 2.0
+        self.spring_cam_x.target = width / 2.0
+        self.spring_cam_y.value = height / 2.0
+        self.spring_cam_y.target = height / 2.0
+        self.spring_zoom.value = self.base_zoom
+        self.spring_zoom.target = self.base_zoom
+        return {
+            "click_timer": 0,
+            "last_click_focus_x": width / 2.0,
+            "last_click_focus_y": height / 2.0,
+            "mouse_idx": 0,
+            "last_click_state": False,
+        }
+
+    def _is_cancelled(self):
+        if self.cancel_check is None:
+            return False
+        try:
+            return bool(self.cancel_check())
+        except Exception:
+            return False
+
+    def _append_batch_state(self, batch_params, batch_clicks, debug_log_file, frame_idx, mx, my, click, current_zoom, cam_x, cam_y, current_frame_clicks, width, height):
+        if debug_log_file:
+            try:
+                vw, vh = width / current_zoom, height / current_zoom
+                cx1, cy1 = max(0, int(cam_x - vw / 2)), max(0, int(cam_y - vh / 2))
+                cx2, cy2 = min(width, int(cx1 + vw)), min(height, int(cy1 + vh))
+                debug_log_file.write(
+                    f"{frame_idx},{current_zoom:.6f},{cam_x:.2f},{cam_y:.2f},{mx:.2f},{my:.2f},{click},{vw:.2f},{vh:.2f},{cx1},{cy1},{cx2},{cy2}\n"
+                )
+                if frame_idx % 100 == 0:
+                    debug_log_file.flush()
+            except Exception:
+                pass
+
+        batch_params.append((current_zoom, cam_x, cam_y, mx, my))
+        batch_clicks.append(list(current_frame_clicks))
+
+    def _sync_runtime_state_from_rust(self, segment_state, runtime_state):
+        click_timer, last_click_focus_x, last_click_focus_y, mouse_idx, last_click_state, spring_zoom_state, spring_cam_x_state, spring_cam_y_state, rust_clicks = runtime_state
+        segment_state["click_timer"] = click_timer
+        segment_state["last_click_focus_x"] = last_click_focus_x
+        segment_state["last_click_focus_y"] = last_click_focus_y
+        segment_state["mouse_idx"] = mouse_idx
+        segment_state["last_click_state"] = last_click_state
+
+        self.spring_zoom.value, self.spring_zoom.target, self.spring_zoom.velocity = spring_zoom_state
+        self.spring_cam_x.value, self.spring_cam_x.target, self.spring_cam_x.velocity = spring_cam_x_state
+        self.spring_cam_y.value, self.spring_cam_y.target, self.spring_cam_y.velocity = spring_cam_y_state
+        self.clicks = [{"x": x, "y": y, "life": life} for x, y, life in rust_clicks]
+
+    def _fill_batch_states(self, batch_frame_indices, mouse_data, segment_state, rust_state_engine, width, height, batch_params, batch_clicks, debug_log_file=None):
+        started = time.perf_counter()
+        state_source = "python"
+
+        if rust_state_engine is not None and batch_frame_indices:
+            try:
+                rust_states, runtime_state = rust_state_engine.advance_batch(batch_frame_indices)
+                for frame_idx, state in zip(batch_frame_indices, rust_states):
+                    mx, my, click, current_zoom, cam_x, cam_y, current_frame_clicks = state
+                    self._append_batch_state(
+                        batch_params,
+                        batch_clicks,
+                        debug_log_file,
+                        frame_idx,
+                        mx,
+                        my,
+                        click,
+                        current_zoom,
+                        cam_x,
+                        cam_y,
+                        current_frame_clicks,
+                        width,
+                        height,
+                    )
+                self._sync_runtime_state_from_rust(segment_state, runtime_state)
+                return rust_state_engine, "rust", (time.perf_counter() - started) * 1000.0
+            except Exception as state_e:
+                logger.error(f"Rust state engine runtime failed, fallback to Python: {state_e}")
+                rust_state_engine = None
+                state_source = "python_fallback"
+
+        dt = 1.0 / self.source_fps if self.source_fps > 0 else 0.033
+        for frame_idx in batch_frame_indices:
+            mx, my, click, current_zoom, cam_x, cam_y, current_frame_clicks, segment_state["click_timer"], segment_state["last_click_focus_x"], segment_state["last_click_focus_y"], segment_state["mouse_idx"] = \
+                self._update_state(
+                    frame_idx,
+                    mouse_data,
+                    segment_state["mouse_idx"],
+                    width,
+                    height,
+                    dt,
+                    segment_state["last_click_state"],
+                    segment_state["click_timer"],
+                    segment_state["last_click_focus_x"],
+                    segment_state["last_click_focus_y"],
+                )
+            segment_state["last_click_state"] = click
+            self._append_batch_state(
+                batch_params,
+                batch_clicks,
+                debug_log_file,
+                frame_idx,
+                mx,
+                my,
+                click,
+                current_zoom,
+                cam_x,
+                cam_y,
+                current_frame_clicks,
+                width,
+                height,
+            )
+
+        return rust_state_engine, state_source, (time.perf_counter() - started) * 1000.0
+
+    def _get_effective_batch_size(self):
+        if self.gpu_processor is not None:
+            try:
+                gpu_max_batch_size = int(self.gpu_processor.max_batch_size())
+            except Exception:
+                gpu_max_batch_size = 24
+            return max(1, min(12, gpu_max_batch_size))
+        if self.rust_processor is not None:
+            return 16
+        return 1
+
     def process(self, progress_callback=None):
         # Set process priority to "Below Normal" to keep system responsive
         try:
@@ -152,24 +343,6 @@ class VideoProcessor:
                             print("[VideoProcessor] Cursor already burned in (Rust Core). Disabling software cursor.")
                     elif isinstance(data, list):
                         mouse_data = data
-                
-                # DPI Awareness Correction: 
-                # If mouse_data exists, calculate the scale factor between recorded mouse coords (logical)
-                # and video dimensions (physical).
-                if len(mouse_data) > 0:
-                    try:
-                        # Get logical screen size
-                        user32 = ctypes.windll.user32
-                        logical_w = user32.GetSystemMetrics(0)
-                        logical_h = user32.GetSystemMetrics(1)
-                        
-                        if logical_w > 0 and logical_h > 0:
-                            self.dpi_scale_x = width / logical_w
-                            self.dpi_scale_y = height / logical_h
-                            if abs(self.dpi_scale_x - 1.0) > 0.05:
-                                print(f"[VideoProcessor] DPI Scaling detected: {self.dpi_scale_x:.2f}x. Correcting coordinates.")
-                    except:
-                        pass # Fallback to 1.0
             except Exception as e:
                 print(f"[VideoProcessor] Failed to load metadata: {e}")
                 # Continue without metadata
@@ -187,8 +360,26 @@ class VideoProcessor:
         real_fps = cap.get(cv2.CAP_PROP_FPS)
         if real_fps > 0:
             self.source_fps = real_fps
+
+        if len(mouse_data) > 0:
+            try:
+                user32 = ctypes.windll.user32
+                logical_w = user32.GetSystemMetrics(0)
+                logical_h = user32.GetSystemMetrics(1)
+                if logical_w > 0 and logical_h > 0:
+                    self.dpi_scale_x = width / logical_w
+                    self.dpi_scale_y = height / logical_h
+                    if abs(self.dpi_scale_x - 1.0) > 0.05:
+                        print(f"[VideoProcessor] DPI Scaling detected: {self.dpi_scale_x:.2f}x. Correcting coordinates.")
+            except Exception:
+                pass
             
         ffmpeg_exe = self._get_ffmpeg_path()
+        segment_ranges = self._normalize_segments(total_frames)
+        if not segment_ranges:
+            cap.release()
+            print("[VideoProcessor] No valid segments to process")
+            return False
         
         # Output resolution logic
         if self.target_resolution:
@@ -255,10 +446,12 @@ class VideoProcessor:
         # Initialize processors (Rust/GPU) before starting FFmpeg so we can choose pipe pix_fmt safely
         self.rust_processor = None
         self.gpu_processor = None
+        rust_state_engine = None
         try:
             rust_core = self._load_rust_core()
             ParallelProcessor = getattr(rust_core, "ParallelProcessor", None)
             GpuProcessor = getattr(rust_core, "GpuProcessor", None)
+            FrameStateEngine = getattr(rust_core, "FrameStateEngine", None)
             if ParallelProcessor is None or GpuProcessor is None:
                 raise ImportError("rust_core extension not available")
 
@@ -289,26 +482,47 @@ class VideoProcessor:
                     logger.error(f"GPU Processor initialization failed: {gpu_e}")
                     self.gpu_processor = None
 
-            if self.gpu_processor is None:
+            try:
+                cpu_fallback_uses_nv12 = self.gpu_processor is not None
+                self.rust_processor = ParallelProcessor(
+                    out_w, out_h,
+                    bg_bytes,
+                    cursor_bytes,
+                    cursor_w, cursor_h,
+                    wm_bytes, self.watermark_overlay.shape[1] if self.watermark_overlay is not None else 0,
+                    self.watermark_overlay.shape[0] if self.watermark_overlay is not None else 0,
+                    self.watermark_pos_xy[0] if self.watermark_overlay is not None else 0,
+                    self.watermark_pos_xy[1] if self.watermark_overlay is not None else 0,
+                    self.bg_padding_ratio,
+                    self.video_corner_radius_ratio,
+                    None,
+                    not cpu_fallback_uses_nv12,
+                    cpu_fallback_uses_nv12,
+                )
+                cpu_fmt = "nv12" if cpu_fallback_uses_nv12 else "yuv420p"
+                print(f"[VideoProcessor] Rust Parallel Processor (CPU fallback, {cpu_fmt}) Initialized")
+            except Exception as cpu_e:
+                logger.error(f"Parallel Processor initialization failed: {cpu_e}")
+                self.rust_processor = None
+
+            if (self.gpu_processor is not None or self.rust_processor is not None) and FrameStateEngine is not None:
                 try:
-                    self.rust_processor = ParallelProcessor(
-                        out_w, out_h,
-                        bg_bytes,
-                        cursor_bytes,
-                        cursor_w, cursor_h,
-                        wm_bytes, self.watermark_overlay.shape[1] if self.watermark_overlay is not None else 0,
-                        self.watermark_overlay.shape[0] if self.watermark_overlay is not None else 0,
-                        self.watermark_pos_xy[0] if self.watermark_overlay is not None else 0,
-                        self.watermark_pos_xy[1] if self.watermark_overlay is not None else 0,
-                        self.bg_padding_ratio,
-                        self.video_corner_radius_ratio,
-                        None,
-                        True,
+                    rust_state_engine = FrameStateEngine(
+                        self.base_zoom,
+                        self.click_zoom,
+                        self.click_duration,
+                        self.source_fps,
+                        width,
+                        height,
+                        self.dpi_scale_x,
+                        self.dpi_scale_y,
+                        mouse_data,
                     )
-                    print(f"[VideoProcessor] Rust Parallel Processor (CPU) Initialized")
-                except Exception as cpu_e:
-                    logger.error(f"Parallel Processor initialization failed: {cpu_e}")
-                    self.rust_processor = None
+                    state_mode = "GPU" if self.gpu_processor is not None else "CPU"
+                    print(f"[VideoProcessor] Rust state engine enabled ({state_mode})")
+                except Exception as state_e:
+                    logger.error(f"Rust state engine initialization failed: {state_e}")
+                    rust_state_engine = None
         except ImportError:
             self.rust_processor = None
             self.gpu_processor = None
@@ -332,6 +546,7 @@ class VideoProcessor:
             input_pix_fmt = 'yuv420p'
         else:
             input_pix_fmt = 'bgr24'
+        python_fallback_allowed = input_pix_fmt == 'bgr24'
 
         input_args = hwaccel_args + [
             '-f', 'rawvideo',
@@ -397,14 +612,61 @@ class VideoProcessor:
 
         # DEBUG: Debug CSV Logging
         debug_log_file = None
+        batch_metrics_log_file = None
+        session_metrics_path = None
+        perf_summary = {
+            "status": "running",
+            "mode": mode,
+            "source_fps": self.source_fps,
+            "target_fps": self.target_fps,
+            "total_frames": total_frames,
+            "selected_frames": sum(max(0, seg["end_frame"] - seg["start_frame"]) for seg in segment_ranges),
+            "segment_count": len(segment_ranges),
+            "ffmpeg_startup_ms": 0.0,
+            "reader_grab_ms_total": 0.0,
+            "reader_retrieve_ms_total": 0.0,
+            "reader_queue_wait_ms_total": 0.0,
+            "reader_queue_wait_ms_max": 0.0,
+            "reader_selected_frames": 0,
+            "processor_batches": 0,
+            "batch_state_ms_total": 0.0,
+            "batch_process_ms_total": 0.0,
+            "batch_queue_wait_ms_total": 0.0,
+            "writer_write_calls": 0,
+            "writer_write_ms_total": 0.0,
+            "writer_write_ms_max": 0.0,
+            "writer_write_bytes_total": 0,
+            "writer_close_wait_ms": 0.0,
+            "audio_merge_ms": 0.0,
+            "total_runtime_ms": 0.0,
+        }
+
+        def _write_session_metrics():
+            if not session_metrics_path:
+                return
+            perf_summary["total_runtime_ms"] = (time.perf_counter() - export_started) * 1000.0
+            try:
+                with open(session_metrics_path, "w", encoding="utf-8") as perf_file:
+                    perf_file.write("metric,value\n")
+                    for key, value in perf_summary.items():
+                        perf_file.write(f"{key},{value}\n")
+            except Exception as perf_e:
+                logger.error(f"Failed to write session metrics: {perf_e}")
+
+        export_started = time.perf_counter()
         try:
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            logs_dir = os.path.join(base_dir, "logs")
-            os.makedirs(logs_dir, exist_ok=True)
-            debug_csv_path = os.path.join(logs_dir, f"vp_debug_{int(time.time())}.csv")
+            logs_dir = get_log_dir()
+            log_ts = int(time.time())
+            debug_csv_path = os.path.join(logs_dir, f"vp_debug_{log_ts}.csv")
             debug_log_file = open(debug_csv_path, "w", encoding="utf-8")
             debug_log_file.write("frame,zoom,cam_x,cam_y,mx,my,click,vw,vh,cx1,cy1,cx2,cy2\n")
             print(f"[VideoProcessor] Debug logging enabled: {debug_csv_path}")
+            batch_metrics_path = os.path.join(logs_dir, f"vp_batch_metrics_{log_ts}.csv")
+            batch_metrics_log_file = open(batch_metrics_path, "w", encoding="utf-8")
+            batch_metrics_log_file.write("batch_idx,mode,state_source,frames,state_ms,process_ms,queue_ms\n")
+            print(f"[VideoProcessor] Batch metrics logging enabled: {batch_metrics_path}")
+            session_metrics_path = os.path.join(logs_dir, f"vp_session_metrics_{log_ts}.csv")
+            print(f"[VideoProcessor] Session metrics logging enabled: {session_metrics_path}")
         except Exception as e:
             print(f"[VideoProcessor] Failed to open debug log: {e}")
 
@@ -413,51 +675,34 @@ class VideoProcessor:
             creation_flags = 0
             if sys.platform == 'win32':
                 creation_flags = 0x00004000 # BELOW_NORMAL_PRIORITY_CLASS
-                
+            ffmpeg_start_started = time.perf_counter()
             process = subprocess.Popen(cmd, stdin=subprocess.PIPE, creationflags=creation_flags)
+            perf_summary["ffmpeg_startup_ms"] = (time.perf_counter() - ffmpeg_start_started) * 1000.0
+            if sys.platform == 'win32':
+                import msvcrt
+                stdin_handle = msvcrt.get_osfhandle(process.stdin.fileno())
+            else:
+                stdin_handle = process.stdin.fileno()
         except Exception as e:
             print(f"[VideoProcessor] Failed to start FFmpeg: {e}")
+            perf_summary["status"] = "ffmpeg_start_failed"
+            _write_session_metrics()
             return False
 
-        # 虚拟摄像机状态
-        # Initialize spring variables with correct starting position
-        self.spring_cam_x.value = width / 2.0
-        self.spring_cam_x.target = width / 2.0
-        self.spring_cam_y.value = height / 2.0
-        self.spring_cam_y.target = height / 2.0
-        self.spring_zoom.value = self.base_zoom
-        self.spring_zoom.target = self.base_zoom
-        
-        # 缩放状态
-        click_timer = 0
-        CLICK_DURATION_FRAMES = int(self.source_fps * self.click_duration) 
-        last_click_focus_x = width / 2.0
-        last_click_focus_y = height / 2.0
-        
-        frame_idx = 0
-        mouse_idx = 0 # Current pointer in mouse_data for timestamp-based lookup
-        last_click_state = False
-        
-        print(f"[VideoProcessor] Processing {total_frames} frames...")
-        
-        start_frame = int(self.start_time * self.source_fps)
-        end_frame = int(self.end_time * self.source_fps) if self.end_time else total_frames
-        
-        # Optimization: Seek to start frame
-        if start_frame > 0:
-            print(f"[VideoProcessor] Seeking to frame {start_frame}...")
-            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-            frame_idx = start_frame
-            
-            # Pre-warm springs to avoid jump at start if we seek
-            # Need to get mouse position at start_frame? 
-            # Ideally we'd simulate from 0, but that's slow. 
-            # We'll just reset to center or first known mouse pos.
-            if frame_idx < len(mouse_data):
-                self.spring_cam_x.value = width / 2.0
-                self.spring_cam_x.target = width / 2.0
-                self.spring_cam_y.value = height / 2.0
-                self.spring_cam_y.target = height / 2.0
+        segment_offsets = []
+        total_selected_frames = 0
+        for seg in segment_ranges:
+            segment_offsets.append(total_selected_frames)
+            total_selected_frames += max(0, seg["end_frame"] - seg["start_frame"])
+
+        first_segment = segment_ranges[0]
+        frame_idx = first_segment["start_frame"]
+        segment_state = self._reset_segment_state(width, height)
+
+        print(
+            f"[VideoProcessor] Processing {len(segment_ranges)} segment(s), "
+            f"{total_selected_frames} source frames selected from {total_frames} total frames..."
+        )
         
         # Pre-allocate buffers
         print(f"[VideoProcessor] Allocating buffers: {out_w}x{out_h}")
@@ -475,21 +720,19 @@ class VideoProcessor:
         # Optimization: Frame skipping logic
         write_interval = 1.0
         should_skip_frames = False
-        next_write_frame = 0.0
         
         if self.source_fps > self.target_fps + 0.1:
             should_skip_frames = True
             write_interval = self.source_fps / self.target_fps
-            # Reset next_write_frame relative to start of processing
-            next_write_frame = float(frame_idx)
             print(f"[VideoProcessor] Downsampling optimization enabled: {self.source_fps} -> {self.target_fps} (Ratio: {write_interval:.2f})")
         
         had_write_error = False
         batch_frames = []
         batch_params = []
         batch_clicks = []
-        # VIP Optimization: Balanced Batch Size (48) for throughput and keeping GPU in High P-State
-        BATCH_SIZE = 48 if (self.rust_processor and self.use_gpu) else (16 if self.rust_processor else 1)
+        batch_frame_indices = []
+        batch_counter = 0
+        BATCH_SIZE = self._get_effective_batch_size()
         
         # VIP Extreme Pipeline: 3-Stage Multi-threaded Architecture
         # Stage 1: Reader (CPU Decoding)
@@ -498,254 +741,450 @@ class VideoProcessor:
         
         # Increase queue sizes to allow better buffering and mask IO latency
         raw_frames_queue = queue.Queue(maxsize=BATCH_SIZE * 3)
-        write_queue = queue.Queue(maxsize=8)
         
-        stop_pipeline = False
-        
-        def reader_worker():
-            nonlocal frame_idx, stop_pipeline
-            curr_idx = frame_idx
-            curr_next_write = next_write_frame
-            
-            while not stop_pipeline:
-                if not cap.isOpened():
-                    break
-                
-                ret = cap.grab()
-                if not ret:
-                    break
-                
-                is_write_frame = True
-                if should_skip_frames:
-                    if curr_idx < int(curr_next_write):
-                        is_write_frame = False
-                    else:
-                        curr_next_write += write_interval
-                
-                if is_write_frame:
-                    ret_retrieve, frame = cap.retrieve()
-                    if ret_retrieve and frame is not None:
-                        # Put to queue. If queue is full, this blocks, providing backpressure.
-                        raw_frames_queue.put((frame, curr_idx))
-                    else:
-                        break
-                curr_idx += 1
-            raw_frames_queue.put(None) # EOF signal
+        stop_pipeline = threading.Event()
+        cancelled = False
 
-        def writer_worker():
-            nonlocal had_write_error
-            while True:
-                item = write_queue.get()
-                if item is None:
-                    break
+        def _stop_requested():
+            return stop_pipeline.is_set() or self._is_cancelled()
+
+        def _request_stop(cancel=False):
+            nonlocal cancelled
+            if cancel:
+                cancelled = True
+            stop_pipeline.set()
+
+        def _queue_put_cancellable(target_queue, item):
+            while not stop_pipeline.is_set():
                 try:
-                    process.stdin.write(item)
+                    target_queue.put(item, timeout=0.1)
+                    return True
+                except queue.Full:
+                    continue
+            return False
+
+        def _terminate_process():
+            try:
+                process.terminate()
+            except Exception:
+                pass
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+        def _flush_current_batch():
+            nonlocal batch_frames, batch_params, batch_clicks, batch_frame_indices, rust_state_engine, segment_state, batch_counter
+            if not batch_frames:
+                return True
+
+            state_source = "precomputed"
+            state_elapsed_ms = 0.0
+            if not batch_params:
+                rust_state_engine, state_source, state_elapsed_ms = self._fill_batch_states(
+                    batch_frame_indices,
+                    mouse_data,
+                    segment_state,
+                    rust_state_engine,
+                    width,
+                    height,
+                    batch_params,
+                    batch_clicks,
+                    debug_log_file=debug_log_file,
+                )
+
+            def _process_batch_python_serial():
+                logger.error("[VideoProcessor] Using legacy Python serial pixel path as compatibility-only fallback")
+                processed_frames = []
+                for i in range(len(batch_frames)):
+                    frame_item = batch_frames[i]
+                    if isinstance(frame_item, np.ndarray):
+                        f = frame_item.reshape((height, width, 3))
+                    else:
+                        f = np.frombuffer(frame_item, dtype=np.uint8).reshape((height, width, 3))
+                    zoom, cam_x, cam_y, mx, my = batch_params[i]
+                    clicks = batch_clicks[i]
+
+                    vw, vh = width / zoom, height / zoom
+                    cx1, cy1 = max(0, int(cam_x - vw/2)), max(0, int(cam_y - vh/2))
+                    cx2, cy2 = min(width, int(cx1 + vw)), min(height, int(cy1 + vh))
+
+                    if (cx2 - cx1) % 2 != 0:
+                        cx2 -= 1
+                    if (cy2 - cy1) % 2 != 0:
+                        cy2 -= 1
+
+                    if cx2 <= cx1:
+                        cx2 = cx1 + 2
+                    if cy2 <= cy1:
+                        cy2 = cy1 + 2
+
+                    crop = f[cy1:cy2, cx1:cx2]
+
+                    pad_px = int(out_w * self.bg_padding_ratio)
+                    avail_w, avail_h = max(2, out_w - 2*pad_px), max(2, out_h - 2*pad_px)
+
+                    src_aspect = width / max(1, height)
+                    tgt_aspect = avail_w / avail_h
+
+                    if src_aspect > tgt_aspect:
+                        inner_w = avail_w
+                        inner_h = int(avail_w / src_aspect)
+                        off_x, off_y = pad_px, pad_px + (avail_h - inner_h) // 2
+                    else:
+                        inner_h = avail_h
+                        inner_w = int(avail_h * src_aspect)
+                        off_x, off_y = pad_px + (avail_w - inner_w) // 2, pad_px
+
+                    inner_w = (inner_w // 2) * 2
+                    inner_h = (inner_h // 2) * 2
+                    inner_w = max(2, inner_w)
+                    inner_h = max(2, inner_h)
+
+                    inner_video = cv2.resize(crop, (inner_w, inner_h), interpolation=cv2.INTER_AREA)
+                    frame_out = bg_image.copy() if bg_image is not None else np.zeros((out_h, out_w, 3), dtype=np.uint8)
+
+                    if self.video_corner_radius_ratio > 0:
+                        mask = np.zeros((inner_h, inner_w), dtype=np.uint8)
+                        r = int(self.video_corner_radius_ratio * out_w)
+                        r = min(r, inner_w // 2, inner_h // 2)
+                        if r > 0:
+                            cv2.rectangle(mask, (r, 0), (inner_w - r, inner_h), 255, -1)
+                            cv2.rectangle(mask, (0, r), (inner_w, inner_h - r), 255, -1)
+                            cv2.circle(mask, (r, r), r, 255, -1)
+                            cv2.circle(mask, (inner_w - r, r), r, 255, -1)
+                            cv2.circle(mask, (r, inner_h - r), r, 255, -1)
+                            cv2.circle(mask, (inner_w - r, inner_h - r), r, 255, -1)
+                        else:
+                            mask[:] = 255
+
+                        mask_3ch = cv2.merge([mask, mask, mask]) / 255.0
+                        roi = frame_out[off_y:off_y+inner_h, off_x:off_x+inner_w]
+                        if roi.shape[:2] == inner_video.shape[:2]:
+                            frame_out[off_y:off_y+inner_h, off_x:off_x+inner_w] = (inner_video * mask_3ch + roi * (1 - mask_3ch)).astype(np.uint8)
+                    else:
+                        frame_out[off_y:off_y+inner_h, off_x:off_x+inner_w] = inner_video
+
+                    scale_x, scale_y = inner_w / (cx2 - cx1), inner_h / (cy2 - cy1)
+
+                    for cx, cy, radius, alpha in clicks:
+                        dcx = int((cx - cx1) * scale_x + off_x)
+                        dcy = int((cy - cy1) * scale_y + off_y)
+                        cv2.circle(frame_out, (dcx, dcy), int(radius), (0, 0, 255), 2)
+
+                    if self.cursor_img is not None:
+                        dcx = int((mx - cx1) * scale_x + off_x)
+                        dcy = int((my - cy1) * scale_y + off_y)
+                        self._overlay_cursor(frame_out, dcx, dcy)
+
+                    self._overlay_watermark(frame_out)
+                    processed_frames.append(frame_out.tobytes())
+
+                return b"".join(processed_frames)
+
+            def _process_batch_rust_cpu(mode_label):
+                if not self.rust_processor:
+                    return None, mode_label
+                try:
+                    processed = self.rust_processor.process_batch(batch_frames, width, height, batch_params, batch_clicks)
+                    if cpu_batch_uses_buffer:
+                        mode_label += "_buffer"
+                    else:
+                        mode_label += "_bytes"
+                    return processed, mode_label
+                except Exception as cpu_e:
+                    logger.error(f"CPU rust process_batch failed: {cpu_e}")
+                    return None, f"{mode_label}_failed"
+
+            process_started = time.perf_counter()
+            cpu_batch_uses_buffer = bool(
+                self.rust_processor
+                and not self.gpu_processor
+                and batch_frames
+                and isinstance(batch_frames[0], np.ndarray)
+            )
+            gpu_batch_uses_buffer = bool(
+                self.gpu_processor
+                and batch_frames
+                and not isinstance(batch_frames[0], (bytes, bytearray))
+            )
+            if self.gpu_processor:
+                process_mode = "gpu_rust" if state_source == "rust" else "gpu_python"
+                try:
+                    processed_batch = self.gpu_processor.process_batch(batch_frames, width, height, batch_params, batch_clicks)
+                    if gpu_batch_uses_buffer and isinstance(processed_batch, bytearray):
+                        process_mode += "_buffer_io"
+                    elif gpu_batch_uses_buffer:
+                        process_mode += "_buffer_in"
+                    elif isinstance(processed_batch, bytearray):
+                        process_mode += "_bytearray_out"
+                except Exception as gpu_e:
+                    logger.error(f"GPU process_batch failed -> fallback: {gpu_e}")
+                    self.gpu_processor = None
+                    if self.rust_processor:
+                        processed_batch, process_mode = _process_batch_rust_cpu("gpu_failed_cpu_rust_fallback")
+                        if processed_batch is None:
+                            if python_fallback_allowed:
+                                process_mode = "gpu_failed_cpu_rust_failed_python_fallback"
+                                processed_batch = _process_batch_python_serial()
+                            else:
+                                logger.error(
+                                    f"GPU failed and CPU rust fallback unavailable while ffmpeg expects {input_pix_fmt}; aborting export batch"
+                                )
+                                return False
+                    else:
+                        if python_fallback_allowed:
+                            process_mode = "gpu_failed_python_fallback"
+                            processed_batch = _process_batch_python_serial()
+                        else:
+                            logger.error(
+                                f"GPU failed but no CPU rust fallback is available while ffmpeg expects {input_pix_fmt}; aborting export batch"
+                            )
+                            return False
+            elif self.rust_processor:
+                processed_batch, process_mode = _process_batch_rust_cpu("cpu_rust")
+                if processed_batch is None:
+                    if python_fallback_allowed:
+                        process_mode = "cpu_rust_failed_python_fallback"
+                        processed_batch = _process_batch_python_serial()
+                    else:
+                        logger.error(
+                            f"CPU rust fallback failed while ffmpeg expects {input_pix_fmt}; aborting export batch"
+                        )
+                        return False
+            else:
+                process_mode = "python_serial"
+                processed_batch = None
+                processed_batch = _process_batch_python_serial()
+            process_elapsed_ms = (time.perf_counter() - process_started) * 1000.0
+
+            write_elapsed_ms = 0.0
+            if processed_batch:
+                write_started = time.perf_counter()
+                try:
+                    if self.rust_processor and self.gpu_processor is None and hasattr(self.rust_processor, 'write_to_fd'):
+                        self.rust_processor.write_to_fd(bytes(processed_batch), stdin_handle)
+                    else:
+                        process.stdin.write(processed_batch)
+                    write_elapsed_ms = (time.perf_counter() - write_started) * 1000.0
+                    perf_summary["writer_write_calls"] += 1
+                    perf_summary["writer_write_ms_total"] += write_elapsed_ms
+                    perf_summary["writer_write_ms_max"] = max(perf_summary["writer_write_ms_max"], write_elapsed_ms)
+                    perf_summary["writer_write_bytes_total"] += len(processed_batch)
                 except Exception as e:
                     logger.error(f"FFmpeg write error: {e}")
                     had_write_error = True
-                write_queue.task_done()
+                    _request_stop()
+                    return False
 
-        # Start Reader and Writer threads
+            batch_counter += 1
+            perf_summary["processor_batches"] += 1
+            perf_summary["batch_state_ms_total"] += state_elapsed_ms
+            perf_summary["batch_process_ms_total"] += process_elapsed_ms
+            perf_summary["batch_queue_wait_ms_total"] += write_elapsed_ms
+            if batch_metrics_log_file:
+                try:
+                    batch_metrics_log_file.write(
+                        f"{batch_counter},{process_mode},{state_source},{len(batch_frame_indices)},{state_elapsed_ms:.3f},{process_elapsed_ms:.3f},{write_elapsed_ms:.3f}\n"
+                    )
+                    batch_metrics_log_file.flush()
+                except Exception:
+                    pass
+
+            batch_frames = []
+            batch_params = []
+            batch_clicks = []
+            batch_frame_indices = []
+            return True
+        
+        def reader_worker():
+            for seg_idx, seg in enumerate(segment_ranges):
+                if _stop_requested():
+                    break
+                if not cap.isOpened():
+                    break
+
+                seg_start = seg["start_frame"]
+                seg_end = seg["end_frame"]
+                curr_idx = seg_start
+                curr_next_write = float(seg_start)
+
+                print(f"[VideoProcessor] Seeking to frame {seg_start} for segment {seg_idx + 1}/{len(segment_ranges)}...")
+                cap.set(cv2.CAP_PROP_POS_FRAMES, seg_start)
+
+                while not _stop_requested() and curr_idx < seg_end:
+                    grab_started = time.perf_counter()
+                    ret = cap.grab()
+                    perf_summary["reader_grab_ms_total"] += (time.perf_counter() - grab_started) * 1000.0
+                    if not ret:
+                        _request_stop()
+                        break
+
+                    is_write_frame = True
+                    if should_skip_frames:
+                        if curr_idx < int(curr_next_write):
+                            is_write_frame = False
+                        else:
+                            curr_next_write += write_interval
+
+                    if is_write_frame:
+                        retrieve_started = time.perf_counter()
+                        ret_retrieve, frame = cap.retrieve()
+                        perf_summary["reader_retrieve_ms_total"] += (time.perf_counter() - retrieve_started) * 1000.0
+                        if ret_retrieve and frame is not None:
+                            # Put to queue. If queue is full, this blocks, providing backpressure.
+                            reader_queue_started = time.perf_counter()
+                            if not _queue_put_cancellable(raw_frames_queue, (frame, curr_idx, seg_idx)):
+                                break
+                            reader_queue_ms = (time.perf_counter() - reader_queue_started) * 1000.0
+                            perf_summary["reader_queue_wait_ms_total"] += reader_queue_ms
+                            perf_summary["reader_queue_wait_ms_max"] = max(perf_summary["reader_queue_wait_ms_max"], reader_queue_ms)
+                            perf_summary["reader_selected_frames"] += 1
+                        else:
+                            _request_stop()
+                            break
+                    curr_idx += 1
+            try:
+                raw_frames_queue.put_nowait(None)
+            except Exception:
+                pass
+
+        # Start Reader thread (writer is now inline in _flush_current_batch via Rust)
         reader_thread = threading.Thread(target=reader_worker, daemon=True)
-        writer_thread = threading.Thread(target=writer_worker, daemon=True)
         reader_thread.start()
-        writer_thread.start()
 
         print(f"[VideoProcessor] Pipeline started. Batch size: {BATCH_SIZE}")
         
         # Main Loop: Stage 2 (Processor)
         try:
+            current_segment_idx = None
             while True:
-                item = raw_frames_queue.get()
+                if self._is_cancelled():
+                    _request_stop(cancel=True)
+                    _terminate_process()
+                    break
+                try:
+                    item = raw_frames_queue.get(timeout=0.1)
+                except queue.Empty:
+                    if stop_pipeline.is_set():
+                        break
+                    continue
                 if item is None:
                     break
                 
-                frame, f_idx = item
+                frame, f_idx, seg_idx = item
+                if current_segment_idx != seg_idx:
+                    if current_segment_idx is not None and batch_frames:
+                        if not _flush_current_batch():
+                            break
+                    current_segment_idx = seg_idx
+                    segment_state = self._reset_segment_state(width, height)
+                    if rust_state_engine is not None:
+                        try:
+                            rust_state_engine.reset_segment(width, height)
+                        except Exception as state_e:
+                            logger.error(f"Rust state engine reset failed, fallback to Python: {state_e}")
+                            rust_state_engine = None
 
                 # Yield every 4 frames to keep system responsive without killing performance
                 if f_idx % 4 == 0:
                     time.sleep(0.001)
+                if self._is_cancelled():
+                    _request_stop(cancel=True)
+                    _terminate_process()
+                    break
                 
-                # 1. Physics & State Update
-                dt = 1.0 / self.source_fps if self.source_fps > 0 else 0.033
-                mx, my, click, current_zoom, cam_x, cam_y, current_frame_clicks, click_timer, last_click_focus_x, last_click_focus_y, mouse_idx = \
-                    self._update_state(f_idx, mouse_data, mouse_idx, width, height, dt, last_click_state, click_timer, last_click_focus_x, last_click_focus_y)
-                
-                # DEBUG: Log Frame Data
-                if debug_log_file:
-                    try:
-                        vw, vh = width / current_zoom, height / current_zoom
-                        cx1, cy1 = max(0, int(cam_x - vw/2)), max(0, int(cam_y - vh/2))
-                        cx2, cy2 = min(width, int(cx1 + vw)), min(height, int(cy1 + vh))
-                        debug_log_file.write(f"{f_idx},{current_zoom:.6f},{cam_x:.2f},{cam_y:.2f},{mx:.2f},{my:.2f},{click},{vw:.2f},{vh:.2f},{cx1},{cy1},{cx2},{cy2}\n")
-                        if f_idx % 100 == 0: debug_log_file.flush()
-                    except: pass
-                
-                last_click_state = click
-                
-                # 2. Batching
+                # 1. Batching
                 if self.gpu_processor:
-                    batch_frames.append(frame)
+                    batch_frames.append(self._prepare_batch_frame(frame, prefer_buffer=True))
                 else:
-                    batch_frames.append(frame.tobytes())
-                
-                batch_params.append((current_zoom, cam_x, cam_y, mx, my))
-                batch_clicks.append(current_frame_clicks)
-                
+                    batch_frames.append(self._prepare_batch_frame(frame, prefer_buffer=self.rust_processor is not None))
+                batch_frame_indices.append(f_idx)
+
                 if len(batch_frames) >= BATCH_SIZE:
-                    if self.gpu_processor:
-                        processed_batch = self.gpu_processor.process_batch(batch_frames, width, height, batch_params, batch_clicks)
-                    elif self.rust_processor:
-                        processed_batch = self.rust_processor.process_batch(batch_frames, width, height, batch_params, batch_clicks)
-                    else:
-                        # Python fallback (slow, but kept for robustness)
-                        processed_frames = []
-                        for i in range(len(batch_frames)):
-                            f = np.frombuffer(batch_frames[i], dtype=np.uint8).reshape((height, width, 3))
-                            zoom, cam_x, cam_y, mx, my = batch_params[i]
-                            clicks = batch_clicks[i]
-                            
-                            # 1. Physics-based Crop & Resize
-                            vw, vh = width / zoom, height / zoom
-                            cx1, cy1 = max(0, int(cam_x - vw/2)), max(0, int(cam_y - vh/2))
-                            # Ensure even dimensions for crop to prevent resize artifacts
-                            cx2, cy2 = min(width, int(cx1 + vw)), min(height, int(cy1 + vh))
-                            
-                            # Ensure crop coordinates are valid and dimensions are even
-                            if (cx2 - cx1) % 2 != 0: cx2 -= 1
-                            if (cy2 - cy1) % 2 != 0: cy2 -= 1
-                            
-                            if cx2 <= cx1: cx2 = cx1 + 2
-                            if cy2 <= cy1: cy2 = cy1 + 2
-                            
-                            crop = f[cy1:cy2, cx1:cx2]
-                            
-                            # Calculate inner dimensions (fit logic)
-                            pad_px = int(out_w * self.bg_padding_ratio)
-                            avail_w, avail_h = max(2, out_w - 2*pad_px), max(2, out_h - 2*pad_px)
-                            
-                            src_aspect = width / max(1, height)
-                            tgt_aspect = avail_w / avail_h
-                            
-                            if src_aspect > tgt_aspect:
-                                inner_w = avail_w
-                                inner_h = int(avail_w / src_aspect)
-                                off_x, off_y = pad_px, pad_px + (avail_h - inner_h) // 2
-                            else:
-                                inner_h = avail_h
-                                inner_w = int(avail_h * src_aspect)
-                                off_x, off_y = pad_px + (avail_w - inner_w) // 2, pad_px
-                            
-                            # Ensure even dimensions
-                            inner_w = (inner_w // 2) * 2
-                            inner_h = (inner_h // 2) * 2
-                            inner_w = max(2, inner_w)
-                            inner_h = max(2, inner_h)
-                                
-                            inner_video = cv2.resize(crop, (inner_w, inner_h), interpolation=cv2.INTER_AREA)
-                            
-                            # 2. Composite onto Background
-                            frame_out = bg_image.copy() if bg_image is not None else np.zeros((out_h, out_w, 3), dtype=np.uint8)
-                            
-                            if self.video_corner_radius_ratio > 0:
-                                # Apply Rounded Corners
-                                mask = np.zeros((inner_h, inner_w), dtype=np.uint8)
-                                r = int(self.video_corner_radius_ratio * out_w)
-                                r = min(r, inner_w // 2, inner_h // 2)
-                                if r > 0:
-                                    cv2.rectangle(mask, (r, 0), (inner_w - r, inner_h), 255, -1)
-                                    cv2.rectangle(mask, (0, r), (inner_w, inner_h - r), 255, -1)
-                                    cv2.circle(mask, (r, r), r, 255, -1)
-                                    cv2.circle(mask, (inner_w - r, r), r, 255, -1)
-                                    cv2.circle(mask, (r, inner_h - r), r, 255, -1)
-                                    cv2.circle(mask, (inner_w - r, inner_h - r), r, 255, -1)
-                                else:
-                                    mask[:] = 255
-                                
-                                # Blend using mask
-                                mask_3ch = cv2.merge([mask, mask, mask]) / 255.0
-                                roi = frame_out[off_y:off_y+inner_h, off_x:off_x+inner_w]
-                                if roi.shape[:2] == inner_video.shape[:2]:
-                                    frame_out[off_y:off_y+inner_h, off_x:off_x+inner_w] = (inner_video * mask_3ch + roi * (1 - mask_3ch)).astype(np.uint8)
-                            else:
-                                frame_out[off_y:off_y+inner_h, off_x:off_x+inner_w] = inner_video
-                                
-                            # 3. Overlays
-                            # Scale cursor/clicks to inner_video coords then offset
-                            scale_x, scale_y = inner_w / (cx2 - cx1), inner_h / (cy2 - cy1)
-                            
-                            for cx, cy, radius, alpha in clicks:
-                                dcx = int((cx - cx1) * scale_x + off_x)
-                                dcy = int((cy - cy1) * scale_y + off_y)
-                                cv2.circle(frame_out, (dcx, dcy), int(radius), (0, 0, 255), 2) # Simple ripple
-                                
-                            if self.cursor_img is not None:
-                                dcx = int((mx - cx1) * scale_x + off_x)
-                                dcy = int((my - cy1) * scale_y + off_y)
-                                self._overlay_cursor(frame_out, dcx, dcy)
-                                
-                            self._overlay_watermark(frame_out)
-                            processed_frames.append(frame_out.tobytes())
-                            
-                        processed_batch = b"".join(processed_frames)                    
-                    if processed_batch:
-                        write_queue.put(processed_batch)
-                    
-                    batch_frames = []; batch_params = []; batch_clicks = []
+                    if not _flush_current_batch():
+                        break
                 
                 # Progress reporting
                 if f_idx % 30 == 0:
                     print(f"[VideoProcessor] Processing frame {f_idx}/{total_frames}", end='\r')
-                    if progress_callback and end_frame > start_frame:
-                        progress_callback(max(0.0, min(1.0, (f_idx - start_frame) / (end_frame - start_frame))))
+                    if progress_callback and total_selected_frames > 0:
+                        seg = segment_ranges[seg_idx]
+                        processed_frames = segment_offsets[seg_idx] + max(0, min(seg["end_frame"], f_idx + 1) - seg["start_frame"])
+                        progress_callback(max(0.0, min(1.0, processed_frames / total_selected_frames)))
 
             # Final batch
             if batch_frames:
-                if self.gpu_processor:
-                    processed_batch = self.gpu_processor.process_batch(batch_frames, width, height, batch_params, batch_clicks)
-                elif self.rust_processor:
-                    processed_batch = self.rust_processor.process_batch(batch_frames, width, height, batch_params, batch_clicks)
-                else:
-                    processed_batch = None
-                
-                if processed_batch:
-                    write_queue.put(processed_batch)
+                _flush_current_batch()
 
         except Exception as e:
             logger.error(f"Processing loop failed: {e}")
             import traceback
             traceback.print_exc()
-            stop_pipeline = True
+            _request_stop()
         
         # Shutdown
         if debug_log_file:
             try: debug_log_file.close()
             except: pass
-        write_queue.put(None)
-        writer_thread.join()
-        reader_thread.join()
-        process.stdin.close()
-        process.wait()
+        if batch_metrics_log_file:
+            try: batch_metrics_log_file.close()
+            except: pass
+        if cancelled:
+            _terminate_process()
+        reader_thread.join(timeout=2.0)
+        try:
+            if process.stdin:
+                process.stdin.close()
+        except Exception:
+            pass
+        try:
+            wait_close_started = time.perf_counter()
+            process.wait(timeout=2.0)
+            perf_summary["writer_close_wait_ms"] = (time.perf_counter() - wait_close_started) * 1000.0
+        except Exception:
+            _terminate_process()
+        cap.release()
         
+        if cancelled:
+            logger.info("[VideoProcessor] Processing cancelled")
+            perf_summary["status"] = "cancelled"
+            _write_session_metrics()
+            return False
         if process.returncode != 0:
             logger.error(f"[VideoProcessor] FFmpeg failed with code {process.returncode}")
+            perf_summary["status"] = f"ffmpeg_failed_{process.returncode}"
+            _write_session_metrics()
             return False
         if had_write_error:
+            perf_summary["status"] = "writer_error"
+            _write_session_metrics()
             return False
+        if not self.merge_source_audio:
+            acc_mode = "GPU (NVENC)" if self.use_gpu else "CPU (x264)"
+            logger.info(f"[VideoProcessor] Done. Acceleration: {acc_mode}. Output: {self.output_path}")
+            perf_summary["status"] = "video_done_no_audio_merge"
+            _write_session_metrics()
+            return True
             
         # Prepare for audio merging
         import shutil
         temp_dir = os.path.join(os.path.dirname(self.output_path), "temp_video_proc_" + str(int(time.time())))
         os.makedirs(temp_dir, exist_ok=True)
         temp_video_path = os.path.join(temp_dir, "video_only.mp4")
+        audio_merge_started = time.perf_counter()
         
         try:
             if os.path.exists(self.output_path):
                 shutil.move(self.output_path, temp_video_path)
             else:
+                perf_summary["status"] = "audio_merge_missing_video"
+                _write_session_metrics()
                 return False
         except Exception as e:
             logger.error(f"Failed to move video: {e}")
+            perf_summary["status"] = "audio_merge_move_failed"
+            _write_session_metrics()
             return False
 
         # Merge audio if present in original
@@ -825,11 +1264,17 @@ class VideoProcessor:
                 print(f"[Export] Merge failed: {ret.stderr.decode(errors='ignore')}")
                 if os.path.exists(temp_video_path) and not os.path.exists(self.output_path):
                      shutil.copy(temp_video_path, self.output_path)
+                perf_summary["audio_merge_ms"] = (time.perf_counter() - audio_merge_started) * 1000.0
+                perf_summary["status"] = f"audio_merge_failed_{ret.returncode}"
+                _write_session_metrics()
                 return False
         except Exception as e:
             print(f"[Export] Critical subprocess error: {e}")
             if os.path.exists(temp_video_path) and not os.path.exists(self.output_path):
                  shutil.copy(temp_video_path, self.output_path)
+            perf_summary["audio_merge_ms"] = (time.perf_counter() - audio_merge_started) * 1000.0
+            perf_summary["status"] = "audio_merge_exception"
+            _write_session_metrics()
             return False
             
         # Cleanup
@@ -840,6 +1285,9 @@ class VideoProcessor:
         
         acc_mode = "GPU (NVENC)" if self.use_gpu else "CPU (x264)"
         logger.info(f"[VideoProcessor] Done. Acceleration: {acc_mode}. Output: {self.output_path}")
+        perf_summary["audio_merge_ms"] = (time.perf_counter() - audio_merge_started) * 1000.0
+        perf_summary["status"] = "success"
+        _write_session_metrics()
         return True
 
     @staticmethod
@@ -854,14 +1302,51 @@ class VideoProcessor:
                     missing.append(attr)
             return missing
 
-        try:
-            m = importlib.import_module("rust_core")
-            missing = _missing_attrs(m)
-            if not missing:
-                return m
-            details.append(f"import_module缺少属性:{','.join(missing)}")
-        except Exception as e:
-            details.append(f"import_module失败:{type(e).__name__}:{e}")
+        def _extra_issue(mod):
+            if "ScreenRecorder" not in required_attrs:
+                return None
+            try:
+                recorder_cls = getattr(mod, "ScreenRecorder", None)
+                if recorder_cls is None:
+                    return "缺少ScreenRecorder"
+                start_sig = inspect.signature(recorder_cls().start)
+                params = list(start_sig.parameters.values())
+                param_names = {p.name for p in params}
+                has_region_names = {"left", "top", "width", "height"}.issubset(param_names)
+                has_varargs = any(
+                    p.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+                    for p in params
+                )
+                if has_region_names or has_varargs:
+                    return None
+                return f"ScreenRecorder.start签名过旧:{start_sig}"
+            except Exception as e:
+                return f"ScreenRecorder接口校验失败:{type(e).__name__}:{e}"
+
+        def _site_package_dirs():
+            candidates = []
+            try:
+                candidates.extend(site.getsitepackages())
+            except Exception:
+                pass
+            try:
+                user_site = site.getusersitepackages()
+                if user_site:
+                    candidates.append(user_site)
+            except Exception:
+                pass
+            return candidates
+
+        def _try_accept_module(mod, source):
+            missing = _missing_attrs(mod)
+            if missing:
+                details.append(f"{source}缺少属性:{','.join(missing)}")
+                return None
+            extra_issue = _extra_issue(mod)
+            if extra_issue:
+                details.append(f"{source}{extra_issue}")
+                return None
+            return mod
 
         project_base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         runtime_base = get_runtime_base_dir()
@@ -872,23 +1357,24 @@ class VideoProcessor:
             exe_base = ""
 
         base_dirs = [
-            project_base,
-            os.path.join(project_base, "rust_src", "target", "maturin"),
+            *_site_package_dirs(),
             os.path.join(project_base, "rust_src", "target", "release"),
+            os.path.join(project_base, "rust_src", "target", "maturin"),
             os.path.join(project_base, "rust_src", "target", "debug"),
+            project_base,
         ]
         if runtime_base:
             base_dirs.extend([
                 runtime_base,
-                os.path.join(runtime_base, "rust_src", "target", "maturin"),
                 os.path.join(runtime_base, "rust_src", "target", "release"),
+                os.path.join(runtime_base, "rust_src", "target", "maturin"),
                 os.path.join(runtime_base, "rust_src", "target", "debug"),
             ])
         if exe_base:
             base_dirs.extend([
                 exe_base,
-                os.path.join(exe_base, "rust_src", "target", "maturin"),
                 os.path.join(exe_base, "rust_src", "target", "release"),
+                os.path.join(exe_base, "rust_src", "target", "maturin"),
                 os.path.join(exe_base, "rust_src", "target", "debug"),
             ])
 
@@ -937,10 +1423,9 @@ class VideoProcessor:
                 mod = importlib.util.module_from_spec(spec)
                 sys.modules["rust_core"] = mod
                 loader.exec_module(mod)
-                missing = _missing_attrs(mod)
-                if not missing:
-                    return mod
-                details.append(f"文件加载缺少属性:{p}:{','.join(missing)}")
+                accepted = _try_accept_module(mod, f"文件加载:{p}:")
+                if accepted is not None:
+                    return accepted
                 try:
                     del sys.modules["rust_core"]
                 except Exception:
@@ -952,6 +1437,14 @@ class VideoProcessor:
                         del sys.modules["rust_core"]
                 except Exception:
                     pass
+
+        try:
+            m = importlib.import_module("rust_core")
+            accepted = _try_accept_module(m, "import_module:")
+            if accepted is not None:
+                return accepted
+        except Exception as e:
+            details.append(f"import_module失败:{type(e).__name__}:{e}")
 
         msg = " | ".join(details[-8:]) if details else "无可用候选文件"
         logger.error(f"[RustCore] 加载失败 context={context}: {msg}")

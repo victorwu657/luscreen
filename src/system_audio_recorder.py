@@ -234,7 +234,9 @@ class SystemAudioRecorder(threading.Thread):
     def stop(self):
         self.logger.info("Stop requested alive=%s paused=%s", self.is_alive(), self.is_paused)
         self.stop_event.set()
-        self.join()
+        self.join(timeout=3.0)
+        if self.is_alive():
+            self.logger.warning("SystemAudioRecorder still alive after stop timeout")
         self.logger.info("Stop completed alive=%s", self.is_alive())
 
     def pause(self):

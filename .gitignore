@@ -33,7 +33,8 @@ models/whisperx/
 examples/
 
 # Dev-only folders (Do NOT commit)
-tests/
+tests/*
+!tests/test_gpu_rust_pipeline.py
 tools/
 
 # Crash dump artifacts

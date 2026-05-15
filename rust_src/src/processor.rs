@@ -1,9 +1,11 @@
+use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 use rayon::prelude::*;
-use image::{RgbaImage, GenericImageView};
+use image::RgbaImage;
 use fast_image_resize as fr;
 use fast_image_resize::images::Image;
+use std::io::Write;
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
@@ -21,12 +23,13 @@ pub struct ParallelProcessor {
     watermark_x: i32,
     watermark_y: i32,
     output_yuv: bool,
+    output_nv12: bool,
 }
 
 #[pymethods]
 impl ParallelProcessor {
     #[new]
-    #[pyo3(signature = (target_width, target_height, bg_bytes=None, cursor_bytes=None, cursor_width=0, cursor_height=0, watermark_bytes=None, watermark_width=0, watermark_height=0, watermark_x=0, watermark_y=0, bg_padding_ratio=0.0, video_corner_radius_ratio=0.0, max_threads=None, output_yuv=false))]
+    #[pyo3(signature = (target_width, target_height, bg_bytes=None, cursor_bytes=None, cursor_width=0, cursor_height=0, watermark_bytes=None, watermark_width=0, watermark_height=0, watermark_x=0, watermark_y=0, bg_padding_ratio=0.0, video_corner_radius_ratio=0.0, max_threads=None, output_yuv=false, output_nv12=false))]
     fn new(
         target_width: u32, 
         target_height: u32, 
@@ -43,6 +46,7 @@ impl ParallelProcessor {
         video_corner_radius_ratio: f32,
         max_threads: Option<usize>,
         output_yuv: bool,
+        output_nv12: bool,
     ) -> Self {
         let cursor_img = if let (Some(bytes), cw, ch) = (cursor_bytes, cursor_width, cursor_height) {
             RgbaImage::from_raw(cw, ch, bytes.to_vec())
@@ -82,6 +86,7 @@ impl ParallelProcessor {
             watermark_x,
             watermark_y,
             output_yuv,
+            output_nv12,
         }
     }
 
@@ -111,50 +116,173 @@ impl ParallelProcessor {
         params: Vec<(f32, f32, f32, f32, f32)>,
         clicks_batch: Vec<Vec<(f32, f32, f32, f32)>>, // (x, y, radius, alpha)
     ) -> PyResult<PyObject> {
-        let frames_data: Vec<Vec<u8>> = frames
-            .iter()
-            .map(|item| {
-                let bytes: Bound<'_, PyBytes> = item.downcast_into()?;
-                Ok(bytes.as_bytes().to_vec())
-            })
-            .collect::<PyResult<Vec<Vec<u8>>>>()?;
+        let batch_size = frames.len();
+        if batch_size == 0 {
+            return Ok(PyBytes::new_bound(py, &[]).into());
+        }
+        if params.len() != batch_size || clicks_batch.len() != batch_size {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "frames, params, clicks_batch length mismatch",
+            ));
+        }
 
-        let frame_size = if self.output_yuv {
+        let frame_in_size = (src_width * src_height * 3) as usize;
+        let mut staged_frames = vec![0u8; batch_size * frame_in_size];
+        for (idx, item) in frames.iter().enumerate() {
+            let buffer: PyBuffer<u8> = PyBuffer::get_bound(&item)?;
+            if buffer.item_size() != 1 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("frame {} has unsupported item_size {}", idx, buffer.item_size()),
+                ));
+            }
+            if !buffer.is_c_contiguous() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("frame {} must be C-contiguous", idx),
+                ));
+            }
+            if buffer.len_bytes() != frame_in_size {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!(
+                        "frame {} length mismatch: expected {} bytes, got {}",
+                        idx,
+                        frame_in_size,
+                        buffer.len_bytes()
+                    ),
+                ));
+            }
+
+            let dst_offset = idx * frame_in_size;
+            let dst = &mut staged_frames[dst_offset..dst_offset + frame_in_size];
+            unsafe {
+                let src = std::slice::from_raw_parts(buffer.buf_ptr() as *const u8, frame_in_size);
+                dst.copy_from_slice(src);
+            }
+        }
+
+        let frame_size = if self.output_yuv || self.output_nv12 {
             (self.target_width * self.target_height * 3) / 2
         } else {
             self.target_width * self.target_height * 3
         } as usize;
         
-        let mut combined = vec![0u8; frames_data.len() * frame_size];
+        let mut combined = vec![0u8; batch_size * frame_size];
 
-        self.pool.install(|| {
-            combined
-                .par_chunks_exact_mut(frame_size)
-                .zip(frames_data.into_par_iter())
-                .zip(params.into_par_iter())
-                .zip(clicks_batch.into_par_iter())
-                .for_each(|(((dst_frame, frame_data), (zoom, cam_x, cam_y, mouse_x, mouse_y)), clicks)| {
-                    if self.output_yuv {
-                        // Alloc temp buffer for BGR composition
-                        // Optimization: Use unsafe set_len to avoid zero-initialization cost (approx 6MB memset)
-                        // This is safe because process_single_frame_into overwrites the entire buffer
-                        let size = (self.target_width * self.target_height * 3) as usize;
-                        let mut bgr_buf = Vec::with_capacity(size);
-                        unsafe { bgr_buf.set_len(size); }
-                        
-                        self.process_single_frame_into(&mut bgr_buf, &frame_data, src_width, src_height, zoom, cam_x, cam_y, mouse_x, mouse_y, &clicks);
-                        self.bgr_to_yuv420p(dst_frame, &bgr_buf, self.target_width, self.target_height);
-                    } else {
-                        self.process_single_frame_into(dst_frame, &frame_data, src_width, src_height, zoom, cam_x, cam_y, mouse_x, mouse_y, &clicks);
-                    }
-                });
+        // pyo3 0.22 uses `allow_threads`; newer PyO3 renamed this API to `detach`.
+        py.allow_threads(|| {
+            self.pool.install(|| {
+                combined
+                    .par_chunks_exact_mut(frame_size)
+                    .zip(staged_frames.par_chunks_exact(frame_in_size))
+                    .zip(params.into_par_iter())
+                    .zip(clicks_batch.into_par_iter())
+                    .for_each(|(((dst_frame, frame_data), (zoom, cam_x, cam_y, mouse_x, mouse_y)), clicks)| {
+                        if self.output_nv12 {
+                            let size = (self.target_width * self.target_height * 3) as usize;
+                            let mut bgr_buf = Vec::with_capacity(size);
+                            unsafe { bgr_buf.set_len(size); }
+
+                            self.process_single_frame_into(&mut bgr_buf, frame_data, src_width, src_height, zoom, cam_x, cam_y, mouse_x, mouse_y, &clicks);
+                            self.bgr_to_nv12(dst_frame, &bgr_buf, self.target_width, self.target_height);
+                        } else if self.output_yuv {
+                            // Alloc temp buffer for BGR composition
+                            // Optimization: Use unsafe set_len to avoid zero-initialization cost (approx 6MB memset)
+                            // This is safe because process_single_frame_into overwrites the entire buffer
+                            let size = (self.target_width * self.target_height * 3) as usize;
+                            let mut bgr_buf = Vec::with_capacity(size);
+                            unsafe { bgr_buf.set_len(size); }
+                            
+                            self.process_single_frame_into(&mut bgr_buf, frame_data, src_width, src_height, zoom, cam_x, cam_y, mouse_x, mouse_y, &clicks);
+                            self.bgr_to_yuv420p(dst_frame, &bgr_buf, self.target_width, self.target_height);
+                        } else {
+                            self.process_single_frame_into(dst_frame, frame_data, src_width, src_height, zoom, cam_x, cam_y, mouse_x, mouse_y, &clicks);
+                        }
+                    });
+            });
         });
 
         Ok(PyBytes::new_bound(py, &combined).into())
     }
-}
+
+    fn write_to_fd(&self, py: Python<'_>, data: &[u8], win_handle: i64) -> PyResult<usize> {
+        let data_owned = data.to_vec();
+        py.allow_threads(move || ParallelProcessor::write_handle(data_owned, win_handle))
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyOSError, _>(e.to_string()))
+    }
+}  // end #[pymethods]
 
 impl ParallelProcessor {
+    fn write_handle(data: Vec<u8>, win_handle: i64) -> std::io::Result<usize> {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::io::{FromRawHandle, OwnedHandle};
+            let handle = win_handle as isize as *mut std::ffi::c_void;
+            let owned = unsafe { OwnedHandle::from_raw_handle(handle) };
+            let mut file: std::fs::File = owned.into();
+            let result = file.write_all(&data).map(|_| data.len());
+            let raw = std::os::windows::io::IntoRawHandle::into_raw_handle(file);
+            std::mem::forget(unsafe { OwnedHandle::from_raw_handle(raw) });
+            result
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            use std::os::unix::io::{FromRawFd, OwnedFd};
+            let owned = unsafe { OwnedFd::from_raw_fd(win_handle as i32) };
+            let mut file: std::fs::File = owned.into();
+            let result = file.write_all(&data).map(|_| data.len());
+            let raw = std::os::unix::io::IntoRawFd::into_raw_fd(file);
+            std::mem::forget(unsafe { OwnedFd::from_raw_fd(raw) });
+            result
+        }
+    }
+
+    fn bgr_to_nv12(&self, dst: &mut [u8], src: &[u8], width: u32, height: u32) {
+        let w = width as usize;
+        let h = height as usize;
+        let y_size = w * h;
+
+        let (y_plane, uv_plane) = dst.split_at_mut(y_size);
+
+        for i in 0..y_size {
+            let b = src[i * 3] as i32;
+            let g = src[i * 3 + 1] as i32;
+            let r = src[i * 3 + 2] as i32;
+            let y_val = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+            y_plane[i] = y_val.clamp(16, 235) as u8;
+        }
+
+        for y in (0..h).step_by(2) {
+            for x in (0..w).step_by(2) {
+                let offsets = [
+                    (y * w + x) * 3,
+                    (y * w + x + 1) * 3,
+                    ((y + 1) * w + x) * 3,
+                    ((y + 1) * w + x + 1) * 3,
+                ];
+
+                let mut sum_r = 0;
+                let mut sum_g = 0;
+                let mut sum_b = 0;
+
+                for idx in offsets {
+                    sum_b += src[idx] as i32;
+                    sum_g += src[idx + 1] as i32;
+                    sum_r += src[idx + 2] as i32;
+                }
+
+                let avg_r = sum_r / 4;
+                let avg_g = sum_g / 4;
+                let avg_b = sum_b / 4;
+
+                let u_val = ((-38 * avg_r - 74 * avg_g + 112 * avg_b + 128) >> 8) + 128;
+                let v_val = ((112 * avg_r - 94 * avg_g - 18 * avg_b + 128) >> 8) + 128;
+
+                let uv_idx = (y / 2) * w + x;
+                uv_plane[uv_idx] = u_val.clamp(16, 240) as u8;
+                uv_plane[uv_idx + 1] = v_val.clamp(16, 240) as u8;
+            }
+        }
+    }
+
     fn bgr_to_yuv420p(&self, dst: &mut [u8], src: &[u8], width: u32, height: u32) {
         #[cfg(target_arch = "x86_64")]
         {

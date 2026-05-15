@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyList};
+use pyo3::types::{PyByteArray, PyList};
 use pyo3::buffer::PyBuffer;
 use wgpu::util::DeviceExt;
 use std::sync::Arc;
@@ -45,15 +45,11 @@ pub struct GpuProcessor {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     pipeline: wgpu::ComputePipeline,
-    global_uniform_buffer: wgpu::Buffer,
-    bg_texture_view: wgpu::TextureView,
-    cursor_texture_view: wgpu::TextureView,
-    watermark_texture_view: wgpu::TextureView,
     target_width: u32,
     target_height: u32,
-    bind_group_layout_0: wgpu::BindGroupLayout,
-    bind_group_layout_1: wgpu::BindGroupLayout,
-    
+    max_batch_size: usize,
+    bind_group_0: wgpu::BindGroup,
+    bind_group_1: wgpu::BindGroup,
     src_buffer: wgpu::Buffer,
     output_buffer: wgpu::Buffer,
     params_buffer: wgpu::Buffer,
@@ -234,12 +230,37 @@ impl GpuProcessor {
             cache: None,
         });
 
+        let bind_group_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Extreme Params Bind Group"),
+            layout: &bind_group_layout_0,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: global_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: params_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: clicks_buffer.as_entire_binding() },
+            ],
+        });
+
+        let bind_group_1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Extreme Assets Bind Group"),
+            layout: &bind_group_layout_1,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: src_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&bg_texture_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&cursor_texture_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&watermark_texture_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: output_buffer.as_entire_binding() },
+            ],
+        });
+
         Ok(GpuProcessor {
-            device, queue, pipeline, global_uniform_buffer,
-            bg_texture_view, cursor_texture_view, watermark_texture_view,
-            target_width, target_height, bind_group_layout_0, bind_group_layout_1,
+            device, queue, pipeline,
+            target_width, target_height, max_batch_size, bind_group_0, bind_group_1,
             src_buffer, output_buffer, params_buffer, clicks_buffer, staging_buffer,
         })
+    }
+
+    fn max_batch_size(&self) -> usize {
+        self.max_batch_size
     }
 
     fn process_batch(
@@ -252,18 +273,67 @@ impl GpuProcessor {
         clicks_batch: Vec<Vec<(f32, f32, f32, f32)>>,
     ) -> PyResult<PyObject> {
         let batch_size = frames.len();
+        if batch_size == 0 {
+            return Ok(PyByteArray::new_bound(py, &[]).into());
+        }
+        if batch_size > self.max_batch_size {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("batch size {} exceeds gpu max {}", batch_size, self.max_batch_size),
+            ));
+        }
+        if params.len() != batch_size || clicks_batch.len() != batch_size {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "frames, params, clicks_batch length mismatch",
+            ));
+        }
         let frame_in_size = (src_width * src_height * 3) as usize;
-        let frame_out_size = (self.target_width as usize * self.target_height as usize * 3 / 2);
+        let frame_out_size = self.target_width as usize * self.target_height as usize * 3 / 2;
+        let upload_size = batch_size * frame_in_size;
+        let readback_size = batch_size * frame_out_size;
 
-        for i in 0..batch_size {
-            let item = frames.get_item(i)?;
+        let upload_buffer_size = wgpu::BufferSize::new(upload_size as u64).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("gpu upload size must be non-zero")
+        })?;
+        let mut upload_view = self
+            .queue
+            .write_buffer_with(&self.src_buffer, 0, upload_buffer_size)
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    format!("failed to allocate gpu upload staging buffer ({} bytes)", upload_size),
+                )
+            })?;
+
+        for (idx, item) in frames.iter().enumerate() {
             let buf: PyBuffer<u8> = PyBuffer::get_bound(&item)?;
+            if buf.item_size() != 1 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("frame {} has unsupported item_size {}", idx, buf.item_size()),
+                ));
+            }
+            if !buf.is_c_contiguous() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("frame {} must be C-contiguous", idx),
+                ));
+            }
+            if buf.len_bytes() != frame_in_size {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!(
+                        "frame {} length mismatch: expected {} bytes, got {}",
+                        idx,
+                        frame_in_size,
+                        buf.len_bytes()
+                    ),
+                ));
+            }
+
+            let dst_offset = idx * frame_in_size;
+            let dst = &mut upload_view[dst_offset..dst_offset + frame_in_size];
             unsafe {
-                let ptr = buf.buf_ptr() as *const u8;
-                let slice = std::slice::from_raw_parts(ptr, frame_in_size);
-                self.queue.write_buffer(&self.src_buffer, (i * frame_in_size) as u64, slice);
+                let src = std::slice::from_raw_parts(buf.buf_ptr() as *const u8, frame_in_size);
+                dst.copy_from_slice(src);
             }
         }
+        drop(upload_view);
 
         let mut all_params = Vec::with_capacity(batch_size);
         let mut all_clicks = Vec::with_capacity(batch_size * 100);
@@ -277,51 +347,67 @@ impl GpuProcessor {
         self.queue.write_buffer(&self.params_buffer, 0, bytemuck::cast_slice(&all_params));
         self.queue.write_buffer(&self.clicks_buffer, 0, bytemuck::cast_slice(&all_clicks));
 
-        let bind_group_0 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None, layout: &self.bind_group_layout_0,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.global_uniform_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: self.params_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: self.clicks_buffer.as_entire_binding() },
-            ],
-        });
-
-        let bind_group_1 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None, layout: &self.bind_group_layout_1,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.src_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.bg_texture_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.cursor_texture_view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.watermark_texture_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: self.output_buffer.as_entire_binding() },
-            ],
-        });
-
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
-            compute_pass.set_pipeline(&self.pipeline);
-            compute_pass.set_bind_group(0, &bind_group_0, &[]);
-            compute_pass.set_bind_group(1, &bind_group_1, &[]);
-            // 4x2 块处理，所以线程组除以 4 和 2
-            compute_pass.dispatch_workgroups((self.target_width + 31) / 32, (self.target_height + 15) / 16, batch_size as u32);
-        }
-
-        encoder.copy_buffer_to_buffer(&self.output_buffer, 0, &self.staging_buffer, 0, (batch_size * frame_out_size) as u64);
-        self.queue.submit(Some(encoder.finish()));
-
-        let buffer_slice = self.staging_buffer.slice(0..(batch_size * frame_out_size) as u64);
+        let buffer_slice = self.staging_buffer.slice(0..readback_size as u64);
         let (sender, receiver) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
-        self.device.poll(wgpu::Maintain::Wait);
-        
-        let mut result_bytes = Vec::with_capacity(batch_size * frame_out_size);
-        if let Ok(Ok(())) = receiver.recv() {
-            let data = buffer_slice.get_mapped_range();
-            result_bytes.extend_from_slice(&data);
+
+        let wait_result = py.allow_threads(move || {
+            let mut encoder =
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                let mut compute_pass =
+                    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+                compute_pass.set_pipeline(&self.pipeline);
+                compute_pass.set_bind_group(0, &self.bind_group_0, &[]);
+                compute_pass.set_bind_group(1, &self.bind_group_1, &[]);
+                // 4x2 块处理，所以线程组除以 4 和 2
+                compute_pass.dispatch_workgroups(
+                    (self.target_width + 31) / 32,
+                    (self.target_height + 15) / 16,
+                    batch_size as u32,
+                );
+            }
+
+            encoder.copy_buffer_to_buffer(
+                &self.output_buffer,
+                0,
+                &self.staging_buffer,
+                0,
+                readback_size as u64,
+            );
+            self.queue.submit(Some(encoder.finish()));
+
+            buffer_slice.map_async(wgpu::MapMode::Read, move |v| {
+                let _ = sender.send(v);
+            });
+            self.device.poll(wgpu::Maintain::Wait);
+            receiver.recv()
+        });
+
+        match wait_result {
+            Ok(Ok(())) => {}
+            Ok(Err(map_err)) => {
+                self.staging_buffer.unmap();
+                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    format!("gpu staging readback failed: {}", map_err),
+                ));
+            }
+            Err(recv_err) => {
+                self.staging_buffer.unmap();
+                return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    format!("gpu readback wait failed: {}", recv_err),
+                ));
+            }
         }
+
+        let data = buffer_slice.get_mapped_range();
+        let result = PyByteArray::new_bound_with(py, readback_size, |dst| {
+            dst.copy_from_slice(&data);
+            Ok(())
+        })?;
+        drop(data);
         self.staging_buffer.unmap();
 
-        Ok(PyBytes::new_bound(py, &result_bytes).into())
+        Ok(result.into())
     }
 }
